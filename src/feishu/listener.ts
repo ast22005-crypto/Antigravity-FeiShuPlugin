@@ -42,6 +42,23 @@ const NEW_CONVERSATION_PATTERNS: RegExp[] = [
     /^new\s+conversation$/i,
 ];
 
+/**
+ * Patterns to detect a switch model command.
+ * Captures the model name/query portion after the command keyword.
+ */
+const SWITCH_MODEL_PATTERNS: RegExp[] = [
+    /^(?:切换模型|修改模型|使用模型)\s+(.+)/i,
+    /^(?:switch\s*model|set\s*model)\s+(.+)/i,
+];
+
+/**
+ * Patterns to detect a switch planning model command.
+ */
+const SWITCH_PLAN_MODEL_PATTERNS: RegExp[] = [
+    /^(?:切换计划模型|修改计划模型|使用计划模型)\s+(.+)/i,
+    /^(?:switch\s*plan\s*model|set\s*plan\s*model)\s+(.+)/i,
+];
+
 /** Maximum number of files to list when multiple matches are found */
 const MAX_LIST_RESULTS = 10;
 
@@ -225,6 +242,24 @@ export class FeishuListener {
                     return;
                 }
 
+                // Switch model command
+                const modelQuery = this.extractSwitchModelCommand(text);
+                if (modelQuery) {
+                    logInfo(`🤖 [${chatType}] 切换模型指令: ${modelQuery}`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleSwitchModel(modelQuery);
+                    return;
+                }
+
+                // Switch plan model command
+                const planModelQuery = this.extractSwitchPlanModelCommand(text);
+                if (planModelQuery) {
+                    logInfo(`🤖 [${chatType}] 切换计划模型指令: ${planModelQuery}`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleSwitchPlanModel(planModelQuery);
+                    return;
+                }
+
                 // File-request command
                 const fileQuery = this.extractFileQuery(text);
                 if (fileQuery) {
@@ -379,7 +414,190 @@ export class FeishuListener {
         }
     }
 
+    // ── Switch Model handling ─────────────────────────────────────────────
+
+    /**
+     * Extract the model name query if it matches a switch-model
+     * command pattern. Returns null if it is not a switch model request.
+     */
+    private extractSwitchModelCommand(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of SWITCH_MODEL_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match && match[1]) {
+                return match[1].trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle the switch model command:
+     *  - Acknowledge to Feishu
+     *  - Update VS Code Setting for the Antigravity Agent model
+     */
+    private async handleSwitchModel(modelName: string): Promise<void> {
+        try {
+            // 唤出 Antigravity 模型选择器 (UI 层面)
+            await vscode.commands.executeCommand('antigravity.toggleModelSelector');
+            
+            // 使用 child_process 调用 Python UI Automation 脚本
+            const cp = require('child_process');
+            const path = require('path');
+            
+            if (process.platform === 'darwin') {
+                // Mac: 使用专门定制的 Accessibility 接口，不走输入流，直接抓取匹配项然后选中+回车
+                const scriptPath = this.extensionPath 
+                    ? path.join(this.extensionPath, 'resources', 'select_model_mac.py')
+                    : path.join(this.workspaceRoot, 'resources', 'select_model_mac.py');
+
+                const cmd = `python3 "${scriptPath}" "${modelName}"`;
+
+                cp.exec(cmd, async (err: any, stdout: string) => {
+                    const result = stdout ? stdout.trim() : '';
+
+                    if (err || result !== 'SUCCESS') {
+                        logError(`模型 UI 选择自动化脚本失败: ${err?.message || result}`);
+                        await this.client.sendText(`⚠️ 未能在界面中找到选项「${modelName}」，请确保下拉框中有该选项匹配，或手动点击确认。`);
+                    } else {
+                        const pn = this.config.projectName || 'Project';
+                        await this.client.sendCard(
+                            `🤖 ${pn} · 模型切换成功`,
+                            [
+                                `**事件**：已收到飞书切换模型指令`,
+                                `**动作**：已精准匹配并选中界面列表项：**${modelName}**`,
+                                '',
+                                '---',
+                                '> 💡 已成功联动前台 UI 的无输入式选择。'
+                            ].join('\n'),
+                            'green',
+                        );
+                        logInfo(`✅ 成功向 Antigravity 选中模型项: ${modelName}`);
+                    }
+                });
+            } else if (process.platform === 'win32') {
+                const scriptPath = this.extensionPath 
+                    ? path.join(this.extensionPath, 'resources', 'select_model.ps1')
+                    : path.join(this.workspaceRoot, 'resources', 'select_model.ps1');
+
+                const cmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}" "${modelName}"`;
+
+                cp.exec(cmd, async (err: any, stdout: string) => {
+                    const result = stdout ? stdout.trim() : '';
+                    if (err || !result.includes('SUCCESS')) {
+                        logError(`模型 UI 选择自动化脚本失败: ${err?.message || result}`);
+                        await this.client.sendText(`⚠️ 自动化选取失败，请手动在弹出的界面选择模型: ${modelName}`);
+                    } else {
+                        const pn = this.config.projectName || 'Project';
+                        await this.client.sendCard(
+                            `🤖 ${pn} · 模型切换成功`,
+                            [
+                                `**事件**：已收到飞书切换模型指令`,
+                                `**动作**：已在 Windows 环境唤起面板并选中：**${modelName}**`,
+                                '',
+                                '---',
+                                '> 💡 已成功联动前台 UI 的无输入式选择。'
+                            ].join('\n'),
+                            'green',
+                        );
+                        logInfo(`✅ 成功向 Antigravity 选中模型项: ${modelName}`);
+                    }
+                });
+            }
+
+        } catch (e: any) {
+            logError(`唤醒模型选择面板遇到错误: ${e.message}`);
+            await this.client.sendText(`❌ 执行失败: ${e.message}`);
+        }
+    }
+
+    /**
+     * Extract the plan model name query if it matches a switch-plan-model
+     * command pattern. Returns null if it is not a switch plan model request.
+     */
+    private extractSwitchPlanModelCommand(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of SWITCH_PLAN_MODEL_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match && match[1]) {
+                return match[1].trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle the switch plan model command:
+     *  - Acknowledge to Feishu
+     *  - Update VS Code Setting for the Antigravity Agent Planning mode model
+     */
+    private async handleSwitchPlanModel(modelName: string): Promise<void> {
+        try {
+            await vscode.commands.executeCommand('antigravity.togglePlanningModeSelector');
+            
+            const cp = require('child_process');
+            const path = require('path');
+            
+            if (process.platform === 'darwin') {
+                const scriptPath = this.extensionPath 
+                    ? path.join(this.extensionPath, 'resources', 'select_model_mac.py')
+                    : path.join(this.workspaceRoot, 'resources', 'select_model_mac.py');
+
+                const cmd = `python3 "${scriptPath}" "${modelName}"`;
+
+                cp.exec(cmd, async (err: any, stdout: string) => {
+                    const result = stdout ? stdout.trim() : '';
+                    if (err || result !== 'SUCCESS') {
+                        logError(`计划模型 UI 自动化脚本失败: ${err?.message || result}`);
+                        await this.client.sendText(`⚠️ 未能在面板找到「${modelName}」，请手动确认选项。`);
+                    } else {
+                        const pn = this.config.projectName || 'Project';
+                        await this.client.sendCard(
+                            `🤖 ${pn} · 计划模型切换成功`,
+                            [
+                                `**事件**：已收到飞书切换计划模型指令`,
+                                `**动作**：已精准匹配并选中计划模型：**${modelName}**`,
+                            ].join('\n'),
+                            'green',
+                        );
+                        logInfo(`✅ 成功向 Antigravity 选中计划模型项: ${modelName}`);
+                    }
+                });
+            } else if (process.platform === 'win32') {
+                const scriptPath = this.extensionPath 
+                    ? path.join(this.extensionPath, 'resources', 'select_model.ps1')
+                    : path.join(this.workspaceRoot, 'resources', 'select_model.ps1');
+
+                const cmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}" "${modelName}"`;
+
+                cp.exec(cmd, async (err: any, stdout: string) => {
+                    const result = stdout ? stdout.trim() : '';
+                    if (err || !result.includes('SUCCESS')) {
+                        logError(`计划模型 UI 自动化脚本失败: ${err?.message || result}`);
+                        await this.client.sendText(`⚠️ 自动化选取失败，请手动确认选项。`);
+                    } else {
+                        const pn = this.config.projectName || 'Project';
+                        await this.client.sendCard(
+                            `🤖 ${pn} · 计划模型切换成功`,
+                            [
+                                `**事件**：已收到飞书切换计划模型指令`,
+                                `**动作**：已在 Windows 环境唤起面板并选中：**${modelName}**`,
+                            ].join('\n'),
+                            'green',
+                        );
+                        logInfo(`✅ 成功向 Antigravity 选中计划模型项: ${modelName}`);
+                    }
+                });
+            }
+
+        } catch (e: any) {
+            logError(`唤醒计划模型选择面板遇到错误: ${e.message}`);
+            await this.client.sendText(`❌ 计划模型切换指令失败: ${e.message}`);
+        }
+    }
+
     // ── File request handling ─────────────────────────────────────────────
+
 
     /**
      * Extract the file query from a text message if it matches a file-request

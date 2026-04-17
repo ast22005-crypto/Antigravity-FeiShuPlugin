@@ -18,6 +18,7 @@
 | 📁 **文件传输** | 在飞书中发送 `发送文件 xxx` 即可获取项目文件 |
 | 🔄 **错误自动重试** | 通过 UI Automation 自动点击 Retry 按钮（Windows / macOS），并同步重试次数到飞书 |
 | 🔌 **自动/手动重启** | 支持手动发送 `重启` 指令，或连续重试达阈值后自动重载恢复工作流 |
+| 🎛️ **模型热切换** | 在飞书中发送指令，全自动跨平台选用并切换 Antigravity 主要/计划模型 |
 | 🚫 **配额异常通知** | 检测到 Model quota reached 时自动通知飞书 |
 | 📋 **消息队列管理** | 支持消息排队、去重、超时保护、自动批处理 |
 | 🧠 **Skill 自动注入** | 自动生成 SKILL.md，让 Agent 理解飞书工作流 |
@@ -189,6 +190,18 @@ new conversation
 
 - 插件将调用 `antigravity.startNewConversation` 为 Antigravity Agent 开启新对话。
 
+#### 4. 模型热切换
+
+无缝在飞书中切换 Antigravity 的驱动大模型（常规模型/计划模型），直接发送：
+
+```text
+切换模型 Gemini 3.1 Pro (High)|Gemini 3.1 Pro (Low)|Claude Sonnet 4.6 (Thinking)|Claude Opus 4.6 (Thinking)
+修改计划模型 Planning|Fast
+```
+
+- 插件将通过内置的跨平台 UI 自动化脚本（完美包含 Windows 和 macOS）自动唤出交互式选单，精准匹配并实现后台无感选中。
+- **支持别名**：`使用模型 xxx`，`修改模型 xxx` 等。
+
 ### Agent 响应协议
 
 Agent 处理完飞书任务后，需要在工作区创建 `.antigravity/feishu_response.json`：
@@ -240,6 +253,8 @@ FeiShuPlugin/
 │   ├── feishu-icon.svg         # 侧边栏图标
 │   ├── auto_retry.ps1          # Windows UI Automation 重试脚本
 │   ├── auto_retry_mac.py       # macOS Accessibility API 重试脚本 (Python)
+│   ├── select_model.ps1        # Windows 模型热切换自动化脚本
+│   ├── select_model_mac.py     # macOS 模型热切换自动化脚本 (Python)
 │   ├── hard_restart.ps1        # Windows 硬重启脚本
 │   ├── hard_restart_mac.sh     # macOS 硬重启脚本
 ├── package.json                # 插件清单 & 配置声明
