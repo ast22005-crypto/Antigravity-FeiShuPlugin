@@ -20,8 +20,8 @@ export function hardRestartAntigravity(extensionPath: string): void {
         logInfo(`[Restarter] Workspace: ${workspacePath}`);
         logInfo(`[Restarter] ScriptPath: ${scriptPath}`);
 
-        // We use powershell on Windows to do a hard restart
         if (process.platform === 'win32') {
+            // Windows: PowerShell hard restart
             const child = child_process.spawn('powershell.exe', [
                 '-ExecutionPolicy', 'Bypass',
                 '-File', scriptPath,
@@ -36,12 +36,26 @@ export function hardRestartAntigravity(extensionPath: string): void {
             child.unref();
 
             logInfo('🔄 已触发后台强刷进程，即将关闭当前窗口...');
-            // Tell VS Code to wait and quit or reload (the external script will kill it anyway)
-            // Using reloadWindow or quit to fail fast visually
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+        } else if (process.platform === 'darwin') {
+            // macOS: bash hard restart script
+            const macScriptPath = path.join(extensionPath, 'resources', 'hard_restart_mac.sh');
+            const child = child_process.spawn('bash', [
+                macScriptPath,
+                execPath,
+                workspacePath
+            ], {
+                detached: true,
+                stdio: 'ignore',
+            });
+
+            child.unref();
+
+            logInfo('🔄 已触发 macOS 后台强刷进程，即将关闭当前窗口...');
             vscode.commands.executeCommand('workbench.action.reloadWindow');
         } else {
-            // Fallback for non-Windows platforms: just reload window
-            logInfo('🔄 非 Windows 平台，使用常规重载窗口');
+            // Fallback for other platforms: just reload window
+            logInfo('🔄 当前平台使用常规重载窗口');
             vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
     } catch (e: any) {

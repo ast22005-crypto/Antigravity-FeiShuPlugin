@@ -1,9 +1,13 @@
 /**
  * agent/errorWatcher.ts — Auto-retry on Antigravity Agent error dialogs
  *
- * Periodically runs a PowerShell script that uses Windows UI Automation
+ * Periodically runs a platform-specific script that uses UI Automation
  * to detect the "Agent terminated due to error" notification and
  * programmatically click the "Retry" button.
+ *
+ * Supported platforms:
+ *   - Windows: PowerShell + Windows UI Automation (auto_retry.ps1)
+ *   - macOS:   AppleScript + System Events Accessibility API (auto_retry_mac.sh)
  *
  * Also detects "Model quota reached" dialogs and notifies via event.
  *
@@ -16,7 +20,8 @@ import { exec } from 'child_process';
 import { logInfo, logWarn, logError, logSuccess } from '../utils/logger';
 
 const DEFAULT_CHECK_INTERVAL_MS = 15_000; // 15 seconds
-const EXEC_TIMEOUT_MS = 10_000;           // single-run timeout
+const EXEC_TIMEOUT_MS_WIN = 10_000;       // single-run timeout (Windows)
+const EXEC_TIMEOUT_MS_MAC = 15_000;       // macOS needs more time for AXManualAccessibility
 
 /** Types of errors detected by the watcher */
 export type ErrorType = 'retry' | 'quota' | 'restart';
@@ -36,6 +41,7 @@ export class ErrorWatcher {
     private quotaCount = 0;
     private intervalMs: number;
     private restartThreshold: number;
+    private platform: NodeJS.Platform;
 
     /** Fires when the Retry button was successfully clicked. */
     private _onRetryTriggered = new vscode.EventEmitter<number>();
@@ -50,11 +56,18 @@ export class ErrorWatcher {
     readonly onRestartRequired = this._onRestartRequired.event;
 
     constructor(extensionPath: string, intervalMs?: number, restartThreshold?: number) {
-        this.scriptPath = path.join(
-            extensionPath,
-            'resources',
-            'auto_retry.ps1',
-        );
+        this.platform = process.platform;
+
+        // Select platform-specific script
+        if (this.platform === 'win32') {
+            this.scriptPath = path.join(extensionPath, 'resources', 'auto_retry.ps1');
+        } else if (this.platform === 'darwin') {
+            this.scriptPath = path.join(extensionPath, 'resources', 'auto_retry_mac.py');
+        } else {
+            // Linux / other — no UI automation support, but we still set a path
+            this.scriptPath = '';
+        }
+
         this.intervalMs = intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
         this.restartThreshold = restartThreshold ?? 10;
     }
@@ -65,8 +78,14 @@ export class ErrorWatcher {
         if (this.timer) {
             return;
         }
+
+        if (this.platform !== 'win32' && this.platform !== 'darwin') {
+            logWarn('⚠️ 当前平台不支持 Agent 错误自动重试 (仅支持 Windows 和 macOS)');
+            return;
+        }
+
         logInfo(
-            `🔄 Agent 错误自动重试监控已启动 (每 ${this.intervalMs / 1000}s 检查)`,
+            `🔄 Agent 错误自动重试监控已启动 (每 ${this.intervalMs / 1000}s 检查, 平台: ${this.platform})`,
         );
         // Run once immediately, then on interval
         this.check();
@@ -112,7 +131,7 @@ export class ErrorWatcher {
         }
         this.checking = true;
         try {
-            const result = await this.runPowerShell();
+            const result = await this.runScript();
 
             // Parse result — some results include "|detail" suffix
             const [status, detail] = this.parseResult(result);
@@ -202,7 +221,7 @@ export class ErrorWatcher {
                     break;
             }
         } catch {
-            // PowerShell execution failed (e.g. timeout) — silently ignore
+            // Script execution failed (e.g. timeout) — silently ignore
         } finally {
             this.checking = false;
         }
@@ -218,19 +237,32 @@ export class ErrorWatcher {
         return [raw.slice(0, idx), raw.slice(idx + 1)];
     }
 
-    // ── PowerShell bridge ─────────────────────────────────────────────────
+    // ── Platform-specific script execution ────────────────────────────────
 
-    private runPowerShell(): Promise<string> {
+    private runScript(): Promise<string> {
         return new Promise((resolve, reject) => {
-            const cmd = [
-                'powershell.exe',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy', 'Bypass',
-                '-File', `"${this.scriptPath}"`,
-            ].join(' ');
+            let cmd: string;
 
-            exec(cmd, { timeout: EXEC_TIMEOUT_MS }, (error, stdout) => {
+            if (this.platform === 'win32') {
+                // Windows: PowerShell + UI Automation
+                cmd = [
+                    'powershell.exe',
+                    '-NoProfile',
+                    '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-File', `"${this.scriptPath}"`,
+                ].join(' ');
+            } else if (this.platform === 'darwin') {
+                // macOS: Python + native Accessibility API (ctypes)
+                cmd = `python3 "${this.scriptPath}"`;
+            } else {
+                // Unsupported platform — return NO_ERROR immediately
+                resolve('NO_ERROR');
+                return;
+            }
+
+            const timeout = this.platform === 'darwin' ? EXEC_TIMEOUT_MS_MAC : EXEC_TIMEOUT_MS_WIN;
+            exec(cmd, { timeout }, (error, stdout) => {
                 if (error) {
                     reject(error);
                     return;

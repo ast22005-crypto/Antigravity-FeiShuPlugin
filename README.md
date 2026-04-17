@@ -16,7 +16,7 @@
 | 📨 **双向消息通信** | 通过 WebSocket 实时接收飞书消息，处理结果自动推送回飞书 |
 | 🤖 **AI Agent 自动触发** | 收到消息后自动唤起 Antigravity Agent 处理任务 |
 | 📁 **文件传输** | 在飞书中发送 `发送文件 xxx` 即可获取项目文件 |
-| 🔄 **错误自动重试** | 通过 Windows UI Automation 自动点击 Retry 按钮，并同步重试次数到飞书 |
+| 🔄 **错误自动重试** | 通过 UI Automation 自动点击 Retry 按钮（Windows / macOS），并同步重试次数到飞书 |
 | 🔌 **自动/手动重启** | 支持手动发送 `重启` 指令，或连续重试达阈值后自动重载恢复工作流 |
 | 🚫 **配额异常通知** | 检测到 Model quota reached 时自动通知飞书 |
 | 📋 **消息队列管理** | 支持消息排队、去重、超时保护、自动批处理 |
@@ -71,7 +71,7 @@
 - **[Antigravity](https://antigravity.dev/)** (VS Code fork) 或 VS Code ≥ 1.90.0
 - **Node.js** ≥ 18
 - **飞书开放平台应用** (需要 App ID 和 App Secret)
-- **Windows** (错误自动重试功能依赖 Windows UI Automation)
+- **Windows / macOS**（错误自动重试功能：Windows 使用 UI Automation，macOS 使用 AppleScript + 辅助功能 API）
 
 ### 1. 创建飞书应用
 
@@ -238,7 +238,10 @@ FeiShuPlugin/
 │       └── fileSearcher.ts     # 工作区文件搜索
 ├── resources/
 │   ├── feishu-icon.svg         # 侧边栏图标
-│   └── auto_retry.ps1          # Windows UI Automation 重试脚本
+│   ├── auto_retry.ps1          # Windows UI Automation 重试脚本
+│   ├── auto_retry_mac.py       # macOS Accessibility API 重试脚本 (Python)
+│   ├── hard_restart.ps1        # Windows 硬重启脚本
+│   ├── hard_restart_mac.sh     # macOS 硬重启脚本
 ├── package.json                # 插件清单 & 配置声明
 └── tsconfig.json               # TypeScript 编译配置
 ```
@@ -251,7 +254,7 @@ FeiShuPlugin/
 |------|------|
 | **消息去重** | 基于 `messageId` 的内存 + 队列双重去重 |
 | **处理超时保护** | 5 分钟超时自动释放 processing 锁 |
-| **错误重试与重启** | PowerShell 脚本自动点击 Retry 并同步次数，连续重试达阈值（默认 10 次）自动重载恢复 |
+| **错误重试与重启** | 跨平台脚本（Windows PowerShell / macOS Python Accessibility API）自动点击 Retry 并同步次数，连续重试达阈值（默认 10 次）自动重载恢复 |
 | **配额异常通知** | 检测到 Model quota reached 时推送飞书通知 |
 | **冷却机制** | 可配置的触发冷却时间，防止短时间内重复触发 |
 | **队列持久化** | 消息队列写入 `.antigravity/feishu_messages.json`，重启不丢失 |
@@ -295,7 +298,8 @@ npm run package
 
 ## ⚠️ 注意事项
 
-- **Windows Only**: 错误自动重试功能（`auto_retry.ps1`）依赖 Windows UI Automation，在 macOS / Linux 上该功能不可用，但不影响其他功能正常工作。
+- **自动重试平台支持**: 错误自动重试功能支持 Windows（UI Automation）和 macOS（Python + macOS Accessibility API）。Linux 上该功能不可用，但不影响其他功能正常工作。
+- **macOS 辅助功能权限**: 在 macOS 上使用自动重试功能，需要在 **系统设置 → 隐私与安全 → 辅助功能** 中授权 Antigravity 应用。macOS 需要系统自带的 Python 3。
 - **安全提醒**: App Secret 等敏感凭证存储在 VS Code Settings 中，请勿将 `.vscode/settings.json` 提交到公开仓库。
 - **飞书应用权限**: 确保飞书应用已开通所需的 API 权限并发布了可用版本。
 - **网络要求**: WebSocket 连接需要能访问 `open.feishu.cn`。

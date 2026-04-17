@@ -71,7 +71,7 @@
         "feishuBot.autoRetryOnError": {
           "type": "boolean",
           "default": true,
-          "description": "Agent 出错时自动点击 Retry 按钮（Windows UI Automation）",
+          "description": "Agent 出错时自动点击 Retry 按钮（Windows / macOS UI Automation）",
           "order": 9
         },
         "feishuBot.autoRetryInterval": {
