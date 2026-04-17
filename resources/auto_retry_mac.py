@@ -279,6 +279,7 @@ def main():
     buttons = {r[2]: r[1] for r in all_results if r[0] == "BUTTON"}
 
     # ── 1. Handle quota ────────────────────────────────────────────────
+    quota_not_found = False
     if has_quota:
         detail = next((r[2] for r in all_results if r[0] == "QUOTA"), "")
         for name in ("Dismiss", "dismiss", "OK", "Close"):
@@ -286,8 +287,7 @@ def main():
                 if press(buttons[name]):
                     print(f"QUOTA_DISMISSED|{detail}")
                     return
-        print(f"QUOTA_REACHED|{detail}")
-        return
+        quota_not_found = f"QUOTA_NOT_FOUND|{detail}"
 
     # ── 2. Handle notification error ───────────────────────────────────
     if has_notification_error:
@@ -319,6 +319,10 @@ def main():
             else:
                 print("INVOKE_FAILED")
             return
+
+    if quota_not_found:
+        print(quota_not_found)
+        return
 
     print("NO_ERROR")
 

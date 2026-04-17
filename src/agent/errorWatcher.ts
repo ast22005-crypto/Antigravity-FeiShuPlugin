@@ -195,6 +195,11 @@ export class ErrorWatcher {
                     });
                     break;
 
+                case 'QUOTA_NOT_FOUND':
+                    // Silent ignore — this means the text was found (e.g. in chat history) 
+                    // but no dismiss button was present, indicating the dialog is already closed.
+                    break;
+
                 case 'RETRY_NOT_FOUND':
                     logWarn(
                         '检测到 Agent 错误弹框，但未找到 Retry 按钮',

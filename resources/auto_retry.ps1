@@ -67,6 +67,7 @@ $quotaCondition = New-Object System.Windows.Automation.OrCondition(
     $quotaCondition2
 )
 
+$quotaNotFoundStr = $null
 try {
     $quotaElement = $root.FindFirst($scope, $quotaCondition)
 } catch {
@@ -103,9 +104,9 @@ if ($quotaElement) {
         }
     }
 
-    # Even if we can't dismiss, report the quota error
-    Write-Output "QUOTA_REACHED|$detailText"
-    exit 0
+    # If the user already dismissed it, the text might still linger in the chat history without a button.
+    # Delay outputting this so we can check for other actionable errors first.
+    $quotaNotFoundStr = "QUOTA_NOT_FOUND|$detailText"
 }
 
 # ── 2. Check for "Agent terminated due to error" ──────────────────────────
@@ -118,26 +119,30 @@ $errorCondition = New-Object System.Windows.Automation.PropertyCondition(
 try {
     $errorElement = $root.FindFirst($scope, $errorCondition)
 } catch {
-    Write-Output "NO_ERROR"
-    exit 0
+    $errorElement = $null
 }
 
-if (-not $errorElement) {
-    Write-Output "NO_ERROR"
-    exit 0
-}
-
-# ── 3. Find and click the Retry button ────────────────────────────────────
-
-$retryButton = Find-ButtonInAncestors $errorElement "Retry"
-
-if ($retryButton) {
-    $clicked = Invoke-Button $retryButton
-    if ($clicked) {
-        Write-Output "RETRY_CLICKED"
+if ($errorElement) {
+    # ── 3. Find and click the Retry button ────────────────────────────────────
+    $retryButton = Find-ButtonInAncestors $errorElement "Retry"
+    
+    if ($retryButton) {
+        $clicked = Invoke-Button $retryButton
+        if ($clicked) {
+            Write-Output "RETRY_CLICKED"
+        } else {
+            Write-Output "INVOKE_FAILED"
+        }
     } else {
-        Write-Output "INVOKE_FAILED"
+        Write-Output "RETRY_NOT_FOUND"
     }
-} else {
-    Write-Output "RETRY_NOT_FOUND"
+    exit 0
 }
+
+# If no actionable retry error was found but quota was found with no button
+if ($quotaNotFoundStr) {
+    Write-Output $quotaNotFoundStr
+    exit 0
+}
+
+Write-Output "NO_ERROR"
