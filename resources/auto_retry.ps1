@@ -52,9 +52,19 @@ function Invoke-Button($button) {
 
 # ── 1. Check for "Model quota reached" dialog ─────────────────────────────
 
-$quotaCondition = New-Object System.Windows.Automation.PropertyCondition(
+$quotaCondition1 = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::NameProperty,
     "Model quota reached"
+)
+
+$quotaCondition2 = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty,
+    "Baseline model quota reached"
+)
+
+$quotaCondition = New-Object System.Windows.Automation.OrCondition(
+    $quotaCondition1,
+    $quotaCondition2
 )
 
 try {
@@ -75,7 +85,7 @@ if ($quotaElement) {
             $textElements = $parent.FindAll($scope, $textCondition)
             foreach ($te in $textElements) {
                 $name = $te.Current.Name
-                if ($name -and $name -ne "Model quota reached" -and $name.Length -gt 5) {
+                if ($name -and $name -ne "Model quota reached" -and $name -ne "Baseline model quota reached" -and $name.Length -gt 5) {
                     $detailText = $name
                     break
                 }

@@ -16,7 +16,8 @@
 | 📨 **双向消息通信** | 通过 WebSocket 实时接收飞书消息，处理结果自动推送回飞书 |
 | 🤖 **AI Agent 自动触发** | 收到消息后自动唤起 Antigravity Agent 处理任务 |
 | 📁 **文件传输** | 在飞书中发送 `发送文件 xxx` 即可获取项目文件 |
-| 🔄 **错误自动重试** | 通过 Windows UI Automation 自动检测并点击 Retry 按钮 |
+| 🔄 **错误自动重试** | 通过 Windows UI Automation 自动点击 Retry 按钮，并同步重试次数到飞书 |
+| 🔌 **自动/手动重启** | 支持手动发送 `重启` 指令，或连续重试达阈值后自动重载恢复工作流 |
 | 🚫 **配额异常通知** | 检测到 Model quota reached 时自动通知飞书 |
 | 📋 **消息队列管理** | 支持消息排队、去重、超时保护、自动批处理 |
 | 🧠 **Skill 自动注入** | 自动生成 SKILL.md，让 Agent 理解飞书工作流 |
@@ -119,6 +120,7 @@ npm run package
 | `feishuBot.triggerCooldown` | number | `10` | 自动触发冷却时间（秒） |
 | `feishuBot.autoRetryOnError` | boolean | `true` | Agent 出错时自动 Retry |
 | `feishuBot.autoRetryInterval` | number | `15` | 自动重试检测间隔（秒） |
+| `feishuBot.autoRestartThreshold`| number | `10` | 连续重试达到此次数后，自动重启 Antigravity |
 
 ### 4. 开始使用
 
@@ -147,11 +149,13 @@ npm run package
 | `飞书: 查看状态` | 查看连接 / 队列 / Agent 状态 |
 | `飞书: 打开设置` | 快速打开飞书相关设置 |
 
-### 飞书端文件传输
+### 飞书端快捷指令
 
-在飞书聊天中直接发送以下格式的消息，插件会**跳过 Agent 队列**，直接搜索并发送文件：
+在飞书聊天中直接发送以下格式的消息，插件会**跳过 Agent 队列**直接响应：
 
-```
+#### 1. 文件传输
+
+```text
 发送文件 config.ts
 发文件 package.json
 找文件 readme
@@ -162,6 +166,28 @@ send file extension.ts
 - 多个匹配时列出候选文件
 - 支持模糊搜索（部分文件名匹配）
 - 单文件大小限制 30 MB
+
+#### 2. 服务重启
+
+直接发送：
+
+```text
+重启
+```
+
+- 插件将立即重载 VS Code 窗口，完全重启 Antigravity Agent 并恢复后续队列。
+
+#### 3. 开启新对话
+
+直接发送：
+
+```text
+开启新对话
+新对话
+new conversation
+```
+
+- 插件将调用 `antigravity.startNewConversation` 为 Antigravity Agent 开启新对话。
 
 ### Agent 响应协议
 
@@ -225,7 +251,7 @@ FeiShuPlugin/
 |------|------|
 | **消息去重** | 基于 `messageId` 的内存 + 队列双重去重 |
 | **处理超时保护** | 5 分钟超时自动释放 processing 锁 |
-| **自动重试** | PowerShell 脚本通过 UI Automation 自动点击 Retry |
+| **错误重试与重启** | PowerShell 脚本自动点击 Retry 并同步次数，连续重试达阈值（默认 10 次）自动重载恢复 |
 | **配额异常通知** | 检测到 Model quota reached 时推送飞书通知 |
 | **冷却机制** | 可配置的触发冷却时间，防止短时间内重复触发 |
 | **队列持久化** | 消息队列写入 `.antigravity/feishu_messages.json`，重启不丢失 |

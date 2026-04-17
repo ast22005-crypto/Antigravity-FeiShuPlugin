@@ -31,6 +31,16 @@ const RESTART_PATTERNS: RegExp[] = [
     /^restart$/i,
 ];
 
+/**
+ * Patterns to detect a new conversation command.
+ * Matches exactly "开启新对话" or "新对话" (with optional whitespace).
+ */
+const NEW_CONVERSATION_PATTERNS: RegExp[] = [
+    /^开启新对话$/,
+    /^新对话$/,
+    /^new\s+conversation$/i,
+];
+
 /** Maximum number of files to list when multiple matches are found */
 const MAX_LIST_RESULTS = 10;
 
@@ -203,6 +213,14 @@ export class FeishuListener {
                     return;
                 }
 
+                // New conversation command
+                if (this.isNewConversationCommand(text)) {
+                    logInfo(`💬 [${chatType}] 开启新对话指令`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleNewConversation();
+                    return;
+                }
+
                 // File-request command
                 const fileQuery = this.extractFileQuery(text);
                 if (fileQuery) {
@@ -314,6 +332,42 @@ export class FeishuListener {
         } catch (e: any) {
             logError(`重启处理失败: ${e.message}`);
             await this.client.sendText(`❌ 重启失败: ${e.message}`);
+        }
+    }
+
+    /**
+     * Check if the message is a new conversation command.
+     */
+    private isNewConversationCommand(text: string): boolean {
+        const trimmed = text.trim();
+        return NEW_CONVERSATION_PATTERNS.some(p => p.test(trimmed));
+    }
+
+    /**
+     * Handle the new conversation command:
+     *  - Acknowledge to Feishu
+     *  - Execute VS Code command to start a new Antigravity conversation
+     */
+    private async handleNewConversation(): Promise<void> {
+        try {
+            const pn = this.config.projectName || 'Project';
+            await this.client.sendCard(
+                `💬 ${pn} · 开启新对话`,
+                [
+                    `**事件**：已触发新建对话指令`,
+                    `**状态**：Antigravity Agent 已开启新对话`,
+                    '',
+                    '---',
+                    '> 💡 您现在可以开始新的任务了。'
+                ].join('\n'),
+                'green',
+            );
+
+            logInfo('💬 收到飞书开启新对话指令，正在执行...');
+            vscode.commands.executeCommand('antigravity.startNewConversation');
+        } catch (e: any) {
+            logError(`开启新对话处理失败: ${e.message}`);
+            await this.client.sendText(`❌ 开启新对话失败: ${e.message}`);
         }
     }
 
