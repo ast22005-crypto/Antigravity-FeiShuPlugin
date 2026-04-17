@@ -89,10 +89,10 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/FeiShuPlugin.git
+git clone https://github.com/ast22005-crypto/Antigravity-FeiShuPlugin.git
 
 # 安装依赖
-cd FeiShuPlugin
+cd Antigravity-FeiShuPlugin
 npm install
 
 # 编译
