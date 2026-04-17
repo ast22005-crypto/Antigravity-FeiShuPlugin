@@ -48,5 +48,7 @@ export interface AgentResponse {
     summary: string;
     details?: string;
     files?: string[];
+    /** File paths to upload and send to the Feishu user */
+    sendFiles?: string[];
     timestamp?: string;
 }

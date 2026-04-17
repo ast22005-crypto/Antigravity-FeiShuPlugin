@@ -1,20 +1,104 @@
-# auto_retry.ps1 — Detect and auto-click "Retry" on Antigravity error dialogs
-# Uses Windows UI Automation to find the error notification and click the Retry button.
+# auto_retry.ps1 — Detect and handle Antigravity error/warning dialogs
+# Uses Windows UI Automation to find error notifications and click action buttons.
 #
 # Stdout results:
-#   RETRY_CLICKED   — Successfully clicked Retry
-#   NO_ERROR        — No error dialog detected
-#   RETRY_NOT_FOUND — Error text found but Retry button not located
-#   INVOKE_FAILED   — Found Retry button but click failed
+#   RETRY_CLICKED          — Successfully clicked Retry on Agent error
+#   QUOTA_REACHED|<detail> — Model quota reached dialog detected (with detail text)
+#   QUOTA_DISMISSED        — Model quota dialog dismissed
+#   NO_ERROR               — No error dialog detected
+#   RETRY_NOT_FOUND        — Error text found but Retry button not located
+#   INVOKE_FAILED          — Found button but click failed
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
 $root  = [System.Windows.Automation.AutomationElement]::RootElement
 $scope = [System.Windows.Automation.TreeScope]::Descendants
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 
-# ── 1. Search for the error text directly from root ───────────────────────
-# This is simpler and more reliable than trying to find the window first.
+# ── Helper: find a named button in ancestor containers ─────────────────────
+function Find-ButtonInAncestors($startElement, $buttonName) {
+    $btnCondition = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $buttonName)),
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button))
+    )
+
+    $current = $walker.GetParent($startElement)
+    for ($i = 0; $i -lt 10; $i++) {
+        if (-not $current) { break }
+        try {
+            $btn = $current.FindFirst($scope, $btnCondition)
+        } catch { }
+        if ($btn) { return $btn }
+        $current = $walker.GetParent($current)
+    }
+    return $null
+}
+
+# ── Helper: click a button via InvokePattern ───────────────────────────────
+function Invoke-Button($button) {
+    try {
+        $invokePattern = $button.GetCurrentPattern(
+            [System.Windows.Automation.InvokePattern]::Pattern)
+        $invokePattern.Invoke()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# ── 1. Check for "Model quota reached" dialog ─────────────────────────────
+
+$quotaCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty,
+    "Model quota reached"
+)
+
+try {
+    $quotaElement = $root.FindFirst($scope, $quotaCondition)
+} catch {
+    $quotaElement = $null
+}
+
+if ($quotaElement) {
+    # Try to extract the detail text (refresh date) from a sibling/child
+    $detailText = ""
+    try {
+        $parent = $walker.GetParent($quotaElement)
+        if ($parent) {
+            $textCondition = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Text)
+            $textElements = $parent.FindAll($scope, $textCondition)
+            foreach ($te in $textElements) {
+                $name = $te.Current.Name
+                if ($name -and $name -ne "Model quota reached" -and $name.Length -gt 5) {
+                    $detailText = $name
+                    break
+                }
+            }
+        }
+    } catch { }
+
+    # Try to click Dismiss button to clear the dialog
+    $dismissBtn = Find-ButtonInAncestors $quotaElement "Dismiss"
+    if ($dismissBtn) {
+        $clicked = Invoke-Button $dismissBtn
+        if ($clicked) {
+            Write-Output "QUOTA_DISMISSED|$detailText"
+            exit 0
+        }
+    }
+
+    # Even if we can't dismiss, report the quota error
+    Write-Output "QUOTA_REACHED|$detailText"
+    exit 0
+}
+
+# ── 2. Check for "Agent terminated due to error" ──────────────────────────
 
 $errorCondition = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::NameProperty,
@@ -33,42 +117,15 @@ if (-not $errorElement) {
     exit 0
 }
 
-# ── 2. Find the Retry button ─────────────────────────────────────────────
-# Walk up the tree from the error text and search for a "Retry" button
-# in each ancestor container.
+# ── 3. Find and click the Retry button ────────────────────────────────────
 
-$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$retryButton = Find-ButtonInAncestors $errorElement "Retry"
 
-$buttonCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, "Retry")),
-    (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button))
-)
-
-$retryButton = $null
-$current     = $walker.GetParent($errorElement)
-
-for ($i = 0; $i -lt 10; $i++) {
-    if (-not $current) { break }
-    try {
-        $retryButton = $current.FindFirst($scope, $buttonCondition)
-    } catch {
-        # ignore traversal errors
-    }
-    if ($retryButton) { break }
-    $current = $walker.GetParent($current)
-}
-
-# ── 3. Click the Retry button ────────────────────────────────────────────
 if ($retryButton) {
-    try {
-        $invokePattern = $retryButton.GetCurrentPattern(
-            [System.Windows.Automation.InvokePattern]::Pattern)
-        $invokePattern.Invoke()
+    $clicked = Invoke-Button $retryButton
+    if ($clicked) {
         Write-Output "RETRY_CLICKED"
-    } catch {
+    } else {
         Write-Output "INVOKE_FAILED"
     }
 } else {

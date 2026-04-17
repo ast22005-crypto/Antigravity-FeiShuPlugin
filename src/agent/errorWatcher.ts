@@ -5,6 +5,8 @@
  * to detect the "Agent terminated due to error" notification and
  * programmatically click the "Retry" button.
  *
+ * Also detects "Model quota reached" dialogs and notifies via event.
+ *
  * This keeps automated Feishu→Agent workflows running unattended.
  */
 
@@ -16,16 +18,30 @@ import { logInfo, logWarn, logError, logSuccess } from '../utils/logger';
 const DEFAULT_CHECK_INTERVAL_MS = 15_000; // 15 seconds
 const EXEC_TIMEOUT_MS = 10_000;           // single-run timeout
 
+/** Types of errors detected by the watcher */
+export type ErrorType = 'retry' | 'quota';
+
+export interface ErrorEvent {
+    type: ErrorType;
+    count: number;
+    detail?: string;
+}
+
 export class ErrorWatcher {
     private timer: ReturnType<typeof setInterval> | undefined;
     private checking = false;
     private scriptPath: string;
     private retryCount = 0;
+    private quotaCount = 0;
     private intervalMs: number;
 
     /** Fires when the Retry button was successfully clicked. */
     private _onRetryTriggered = new vscode.EventEmitter<number>();
     readonly onRetryTriggered = this._onRetryTriggered.event;
+
+    /** Fires when any Antigravity error is detected (retry, quota, etc). */
+    private _onErrorDetected = new vscode.EventEmitter<ErrorEvent>();
+    readonly onErrorDetected = this._onErrorDetected.event;
 
     constructor(extensionPath: string, intervalMs?: number) {
         this.scriptPath = path.join(
@@ -66,9 +82,14 @@ export class ErrorWatcher {
         return this.retryCount;
     }
 
+    getQuotaCount(): number {
+        return this.quotaCount;
+    }
+
     dispose(): void {
         this.stop();
         this._onRetryTriggered.dispose();
+        this._onErrorDetected.dispose();
     }
 
     // ── Core check ────────────────────────────────────────────────────────
@@ -81,7 +102,10 @@ export class ErrorWatcher {
         try {
             const result = await this.runPowerShell();
 
-            switch (result) {
+            // Parse result — some results include "|detail" suffix
+            const [status, detail] = this.parseResult(result);
+
+            switch (status) {
                 case 'RETRY_CLICKED':
                     this.retryCount++;
                     logSuccess(
@@ -91,6 +115,40 @@ export class ErrorWatcher {
                         `🔄 Antigravity Agent 错误已自动重试 (第 ${this.retryCount} 次)`,
                     );
                     this._onRetryTriggered.fire(this.retryCount);
+                    this._onErrorDetected.fire({
+                        type: 'retry',
+                        count: this.retryCount,
+                    });
+                    break;
+
+                case 'QUOTA_REACHED':
+                    this.quotaCount++;
+                    logWarn(
+                        `⚠️ 检测到 Model quota reached (第 ${this.quotaCount} 次): ${detail || '未知详情'}`,
+                    );
+                    vscode.window.showWarningMessage(
+                        `⚠️ Model quota reached — ${detail || '配额已用尽'}`,
+                    );
+                    this._onErrorDetected.fire({
+                        type: 'quota',
+                        count: this.quotaCount,
+                        detail: detail || undefined,
+                    });
+                    break;
+
+                case 'QUOTA_DISMISSED':
+                    this.quotaCount++;
+                    logWarn(
+                        `⚠️ 已关闭 Model quota 弹框 (第 ${this.quotaCount} 次): ${detail || '未知详情'}`,
+                    );
+                    vscode.window.showWarningMessage(
+                        `⚠️ Model quota reached (已自动关闭) — ${detail || '配额已用尽'}`,
+                    );
+                    this._onErrorDetected.fire({
+                        type: 'quota',
+                        count: this.quotaCount,
+                        detail: detail || undefined,
+                    });
                     break;
 
                 case 'RETRY_NOT_FOUND':
@@ -116,6 +174,16 @@ export class ErrorWatcher {
         } finally {
             this.checking = false;
         }
+    }
+
+    // ── Result parser ─────────────────────────────────────────────────────
+
+    private parseResult(raw: string): [string, string] {
+        const idx = raw.indexOf('|');
+        if (idx === -1) {
+            return [raw, ''];
+        }
+        return [raw.slice(0, idx), raw.slice(idx + 1)];
     }
 
     // ── PowerShell bridge ─────────────────────────────────────────────────

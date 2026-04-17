@@ -148,6 +148,7 @@ export async function activate(
         config,
         feishuClient,
         messageQueue,
+        workspaceRoot,
     );
 
     feishuListener.onConnectionChange(connected => {
@@ -256,6 +257,55 @@ export async function activate(
             }
         });
 
+        // Unified error notification → Feishu
+        errorWatcher.onErrorDetected(evt => {
+            if (!feishuClient?.hasTarget()) {
+                return;
+            }
+
+            const pn = getProjectName(config);
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            if (evt.type === 'retry') {
+                feishuClient.sendCard(
+                    `🔄 ${pn} · Antigravity 自动重试`,
+                    [
+                        `**项目**：${pn}`,
+                        `**事件**：检测到 Antigravity Agent 异常，已自动点击 Retry`,
+                        `**累计重试**：第 **${evt.count}** 次`,
+                        `**时间**：${now}`,
+                        '',
+                        '---',
+                        '> ⚠️ 如频繁重试，请检查 Agent 状态或手动介入',
+                    ].join('\n'),
+                    'orange',
+                );
+            } else if (evt.type === 'quota') {
+                feishuClient.sendCard(
+                    `🚫 ${pn} · Model 配额用尽`,
+                    [
+                        `**项目**：${pn}`,
+                        `**事件**：检测到 Model quota reached 异常`,
+                        evt.detail ? `**详情**：${evt.detail}` : '',
+                        `**累计触发**：第 **${evt.count}** 次`,
+                        `**时间**：${now}`,
+                        '',
+                        '---',
+                        '> 🚫 模型配额已用尽，Agent 无法继续工作。请升级 Plan 或等待配额刷新后重试。',
+                    ].filter(Boolean).join('\n'),
+                    'red',
+                );
+            }
+        });
+
         errorWatcher.start();
         context.subscriptions.push({ dispose: () => errorWatcher!.dispose() });
     }
@@ -359,6 +409,21 @@ function setupResponseWatcher(
                     logSuccess('处理结果已推送到飞书');
                 } else {
                     logError('推送结果到飞书失败');
+                }
+            }
+
+            // Send files if requested by Agent
+            if (response.sendFiles && response.sendFiles.length > 0 && feishuClient) {
+                logInfo(`Agent 请求发送 ${response.sendFiles.length} 个文件`);
+                for (const filePath of response.sendFiles) {
+                    // Resolve relative paths against workspace root
+                    const absPath = path.isAbsolute(filePath)
+                        ? filePath
+                        : path.join(workspaceRoot, filePath);
+                    const ok = await feishuClient.uploadAndSendFile(absPath);
+                    if (!ok) {
+                        logWarn(`文件发送失败: ${filePath}`);
+                    }
                 }
             }
 
@@ -533,7 +598,7 @@ function registerCommands(
             `双向通信: ${feishuClient?.hasTarget() ? '✅' : '⏳'}`,
             `待处理: ${messageQueue?.getMessageCount() ?? 0} 条`,
             `Agent: ${messageQueue?.isProcessing() ? '🔄' : '💤'}`,
-            `自动重试: ${errorWatcher?.isRunning() ? `✅ (已重试 ${errorWatcher.getRetryCount()} 次)` : '❌'}`,
+            `自动重试: ${errorWatcher?.isRunning() ? `✅ (重试 ${errorWatcher.getRetryCount()} 次, 配额异常 ${errorWatcher.getQuotaCount()} 次)` : '❌'}`,
         ];
         showOutputChannel();
         logInfo(`飞书状态:\n  ${items.join('\n  ')}`);

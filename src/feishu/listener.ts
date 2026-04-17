@@ -9,7 +9,20 @@
 import { FeishuConfig, FeishuMessage, FeishuTarget } from '../types';
 import { FeishuClient } from './client';
 import { MessageQueue } from '../queue/messageQueue';
+import { FileSearcher } from '../utils/fileSearcher';
 import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
+
+/**
+ * Regex patterns to detect file-request commands.
+ * Captures the query portion after the command keyword.
+ */
+const FILE_REQUEST_PATTERNS: RegExp[] = [
+    /^(?:发送文件|发文件|找文件|查文件|获取文件)\s+(.+)/i,
+    /^(?:send\s*file|get\s*file|find\s*file)\s+(.+)/i,
+];
+
+/** Maximum number of files to list when multiple matches are found */
+const MAX_LIST_RESULTS = 10;
 
 export class FeishuListener {
     private config: FeishuConfig;
@@ -18,6 +31,8 @@ export class FeishuListener {
     private wsClient: any = null;
     private seenIds = new Set<string>();
     private connected = false;
+    private workspaceRoot: string;
+    private fileSearcher: FileSearcher;
 
     private onConnectedCb?: (connected: boolean) => void;
     private onTargetCb?: (target: FeishuTarget) => void;
@@ -26,10 +41,13 @@ export class FeishuListener {
         config: FeishuConfig,
         client: FeishuClient,
         queue: MessageQueue,
+        workspaceRoot?: string,
     ) {
         this.config = config;
         this.client = client;
         this.queue = queue;
+        this.workspaceRoot = workspaceRoot || '.';
+        this.fileSearcher = new FileSearcher(this.workspaceRoot);
     }
 
     onConnectionChange(cb: (connected: boolean) => void): void {
@@ -165,6 +183,17 @@ export class FeishuListener {
                 }
             }
 
+            // ── Check for file-request command (handled directly, not queued) ──
+            if (msgType === 'text') {
+                const fileQuery = this.extractFileQuery(text);
+                if (fileQuery) {
+                    logInfo(`📂 [${chatType}] 文件请求: ${fileQuery}`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleFileRequest(fileQuery);
+                    return;
+                }
+            }
+
             // Media messages — enqueue but wait for follow-up instruction
             const isMedia = msgType === 'image' || msgType === 'file';
             if (isMedia) {
@@ -214,6 +243,132 @@ export class FeishuListener {
             }
         } catch (e: any) {
             logError(`消息处理异常: ${e.message}`);
+        }
+    }
+
+    // ── File request handling ─────────────────────────────────────────────
+
+    /**
+     * Extract the file query from a text message if it matches a file-request
+     * command pattern. Returns null if the message is not a file request.
+     */
+    private extractFileQuery(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of FILE_REQUEST_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match && match[1]) {
+                return match[1].trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle a file-request command:
+     *  - Search for matching files in the workspace
+     *  - 0 results: notify user
+     *  - 1 result: upload and send immediately
+     *  - 2~10 results: show a list for the user to identify
+     *  - >10 results: ask user to refine the query
+     */
+    private async handleFileRequest(query: string): Promise<void> {
+        try {
+            const results = this.fileSearcher.search(query);
+
+            if (results.length === 0) {
+                await this.client.sendText(
+                    `❌ 未找到匹配「${query}」的文件。\n\n` +
+                    `💡 提示：\n` +
+                    `• 试试文件名关键词，如 \`发送文件 config\`\n` +
+                    `• 支持部分匹配，如 \`发送文件 extension\``,
+                );
+                return;
+            }
+
+            if (results.length === 1) {
+                const file = results[0];
+                await this.client.sendText(
+                    `📂 找到文件: \`${file.relativePath}\` (${FileSearcher.formatSize(file.size)})\n正在上传...`,
+                );
+
+                const ok = await this.client.uploadAndSendFile(
+                    file.absolutePath,
+                );
+                if (!ok) {
+                    await this.client.sendText(
+                        `❌ 文件上传失败: ${file.relativePath}`,
+                    );
+                }
+                return;
+            }
+
+            if (results.length > MAX_LIST_RESULTS) {
+                // Too many results — show first 10 and ask to refine
+                const listLines = results
+                    .slice(0, MAX_LIST_RESULTS)
+                    .map(
+                        (f, i) =>
+                            `${i + 1}. \`${f.relativePath}\` (${FileSearcher.formatSize(f.size)})`,
+                    )
+                    .join('\n');
+
+                await this.client.sendCard(
+                    `📂 匹配结果过多 (${results.length} 个)`,
+                    `关键词「${query}」匹配到太多文件，请提供更精确的名称。\n\n` +
+                    `**前 ${MAX_LIST_RESULTS} 个匹配：**\n${listLines}\n\n` +
+                    `💡 发送完整文件名可精确定位，例如：\n\`发送文件 ${results[0].relativePath}\``,
+                    'orange',
+                );
+                return;
+            }
+
+            // 2~10 results — show list, send all exact-name matches or ask
+            // Check if there are exact filename matches
+            const queryLower = query.toLowerCase();
+            const exactMatches = results.filter(
+                f =>
+                    f.relativePath
+                        .split(/[/\\]/)
+                        .pop()
+                        ?.toLowerCase() === queryLower,
+            );
+
+            if (exactMatches.length === 1) {
+                // Only one exact name match among multiple partial matches — send it
+                const file = exactMatches[0];
+                await this.client.sendText(
+                    `📂 精确匹配: \`${file.relativePath}\` (${FileSearcher.formatSize(file.size)})\n正在上传...`,
+                );
+                const ok = await this.client.uploadAndSendFile(
+                    file.absolutePath,
+                );
+                if (!ok) {
+                    await this.client.sendText(
+                        `❌ 文件上传失败: ${file.relativePath}`,
+                    );
+                }
+                return;
+            }
+
+            // Multiple matches — show all and let user pick
+            const listLines = results
+                .map(
+                    (f, i) =>
+                        `${i + 1}. \`${f.relativePath}\` (${FileSearcher.formatSize(f.size)})`,
+                )
+                .join('\n');
+
+            await this.client.sendCard(
+                `📂 找到 ${results.length} 个匹配文件`,
+                `关键词「${query}」匹配到以下文件：\n\n${listLines}\n\n` +
+                `💡 请发送完整路径来获取指定文件，例如：\n\`发送文件 ${results[0].relativePath}\``,
+                'blue',
+            );
+        } catch (e: any) {
+            logError(`文件请求处理失败: ${e.message}`);
+            await this.client.sendText(
+                `❌ 文件查找出错: ${e.message}`,
+            );
         }
     }
 

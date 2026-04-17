@@ -39,8 +39,8 @@ description: >
   飞书机器人集成（由 VS Code Extension 驱动）。
   接收飞书消息作为任务输入，处理完成后将结果写入
   .antigravity/feishu_response.json，Extension 自动推送到飞书。
-version: 1.0.0
-tags: [feishu, notification, automation]
+version: 1.1.0
+tags: [feishu, notification, automation, file-transfer]
 ---
 
 ## 识别飞书消息触发
@@ -65,18 +65,48 @@ tags: [feishu, notification, automation]
 {
   "summary": "一句话概括你做了什么",
   "details": "详细的处理过程和结果说明",
-  "files": ["修改过的文件路径列表（可选）"]
+  "files": ["修改过的文件路径列表（可选）"],
+  "sendFiles": ["需要发送给飞书用户的文件路径列表（可选）"]
 }
 \`\`\`
 
 Extension 会自动：
 1. 检测到此文件后读取内容
 2. 将结果推送到飞书（卡片消息格式）
-3. 清空消息队列，释放 processing 锁
-4. 删除响应文件
+3. 如果 \`sendFiles\` 不为空，自动将列表中的文件上传并发送给飞书用户
+4. 清空消息队列，释放 processing 锁
+5. 删除响应文件
 
 **你不需要手动运行任何命令来发送飞书消息或清空队列！**
 只需创建这个 JSON 文件即可。
+
+---
+
+## 文件发送功能
+
+### 用户直接请求（由 Extension 自动处理，不经过 Agent）
+
+用户可以在飞书中发送以下指令，Extension 会直接在项目中搜索并发送文件：
+- \`发送文件 xxx\` / \`发文件 xxx\` / \`找文件 xxx\` / \`查文件 xxx\`
+- \`send file xxx\` / \`get file xxx\` / \`find file xxx\`
+
+**这类指令不会进入消息队列，Agent 不需要处理。**
+
+### Agent 主动发送文件
+
+当 Agent 处理完任务后需要将文件发送给用户时，
+在 \`feishu_response.json\` 中使用 \`sendFiles\` 字段：
+
+\`\`\`json
+{
+  "summary": "已生成报告",
+  "sendFiles": ["reports/output.pdf", "data/result.csv"]
+}
+\`\`\`
+
+- 路径支持相对路径（相对于工作区根目录）和绝对路径
+- 单文件大小限制 30 MB
+- 空文件会被跳过
 
 ---
 
