@@ -243,9 +243,14 @@ export async function activate(
             .getConfiguration('feishuBot')
             .get<number>('autoRetryInterval', 15) * 1000;
 
+        const restartThreshold = vscode.workspace
+            .getConfiguration('feishuBot')
+            .get<number>('autoRestartThreshold', 10);
+
         errorWatcher = new ErrorWatcher(
             context.extensionPath,
             checkInterval,
+            restartThreshold,
         );
 
         // When auto-retry fires, release stale processing lock
@@ -308,6 +313,47 @@ export async function activate(
 
         errorWatcher.start();
         context.subscriptions.push({ dispose: () => errorWatcher!.dispose() });
+
+        // When retry count reaches threshold, restart Antigravity (reload window)
+        errorWatcher.onRestartRequired(async (count) => {
+            const pn = getProjectName(config);
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            logWarn(
+                `🔄 重试已达 ${count} 次，即将重载 VS Code 窗口以完全重启 Antigravity...`,
+            );
+
+            // Notify Feishu before restarting
+            if (feishuClient?.hasTarget()) {
+                await feishuClient.sendCard(
+                    `🔄 ${pn} · Antigravity 即将完全重启`,
+                    [
+                        `**项目**：${pn}`,
+                        `**事件**：连续重试已达 **${count}** 次，自动触发完全重启`,
+                        `**操作**：重载 VS Code 窗口`,
+                        `**时间**：${now}`,
+                        '',
+                        '---',
+                        '> 🔄 窗口即将重载，Antigravity 将完全重启。如重启后仍频繁异常，请手动检查。',
+                    ].join('\n'),
+                    'red',
+                );
+            }
+
+            // Small delay to let the Feishu message send
+            await sleep(2000);
+
+            // Reload the VS Code window — this fully restarts all extensions including Antigravity
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+        });
     }
 
     // ── 12. Send project-open notification ─────────────────────────────
@@ -598,7 +644,7 @@ function registerCommands(
             `双向通信: ${feishuClient?.hasTarget() ? '✅' : '⏳'}`,
             `待处理: ${messageQueue?.getMessageCount() ?? 0} 条`,
             `Agent: ${messageQueue?.isProcessing() ? '🔄' : '💤'}`,
-            `自动重试: ${errorWatcher?.isRunning() ? `✅ (重试 ${errorWatcher.getRetryCount()} 次, 配额异常 ${errorWatcher.getQuotaCount()} 次)` : '❌'}`,
+            `自动重试: ${errorWatcher?.isRunning() ? `✅ (累计 ${errorWatcher.getRetryCount()} 次, 连续 ${errorWatcher.getConsecutiveRetryCount()} 次, 配额 ${errorWatcher.getQuotaCount()} 次)` : '❌'}`,
         ];
         showOutputChannel();
         logInfo(`飞书状态:\n  ${items.join('\n  ')}`);

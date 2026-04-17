@@ -19,7 +19,7 @@ const DEFAULT_CHECK_INTERVAL_MS = 15_000; // 15 seconds
 const EXEC_TIMEOUT_MS = 10_000;           // single-run timeout
 
 /** Types of errors detected by the watcher */
-export type ErrorType = 'retry' | 'quota';
+export type ErrorType = 'retry' | 'quota' | 'restart';
 
 export interface ErrorEvent {
     type: ErrorType;
@@ -32,8 +32,10 @@ export class ErrorWatcher {
     private checking = false;
     private scriptPath: string;
     private retryCount = 0;
+    private consecutiveRetryCount = 0;
     private quotaCount = 0;
     private intervalMs: number;
+    private restartThreshold: number;
 
     /** Fires when the Retry button was successfully clicked. */
     private _onRetryTriggered = new vscode.EventEmitter<number>();
@@ -43,13 +45,18 @@ export class ErrorWatcher {
     private _onErrorDetected = new vscode.EventEmitter<ErrorEvent>();
     readonly onErrorDetected = this._onErrorDetected.event;
 
-    constructor(extensionPath: string, intervalMs?: number) {
+    /** Fires when retry count reaches threshold and a full restart is needed. */
+    private _onRestartRequired = new vscode.EventEmitter<number>();
+    readonly onRestartRequired = this._onRestartRequired.event;
+
+    constructor(extensionPath: string, intervalMs?: number, restartThreshold?: number) {
         this.scriptPath = path.join(
             extensionPath,
             'resources',
             'auto_retry.ps1',
         );
         this.intervalMs = intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
+        this.restartThreshold = restartThreshold ?? 10;
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -82,6 +89,10 @@ export class ErrorWatcher {
         return this.retryCount;
     }
 
+    getConsecutiveRetryCount(): number {
+        return this.consecutiveRetryCount;
+    }
+
     getQuotaCount(): number {
         return this.quotaCount;
     }
@@ -90,6 +101,7 @@ export class ErrorWatcher {
         this.stop();
         this._onRetryTriggered.dispose();
         this._onErrorDetected.dispose();
+        this._onRestartRequired.dispose();
     }
 
     // ── Core check ────────────────────────────────────────────────────────
@@ -108,17 +120,30 @@ export class ErrorWatcher {
             switch (status) {
                 case 'RETRY_CLICKED':
                     this.retryCount++;
+                    this.consecutiveRetryCount++;
                     logSuccess(
-                        `✅ 自动点击了 Retry 按钮 (第 ${this.retryCount} 次)`,
+                        `✅ 自动点击了 Retry 按钮 (累计 ${this.retryCount} 次, 连续 ${this.consecutiveRetryCount} 次)`,
                     );
                     vscode.window.showInformationMessage(
-                        `🔄 Antigravity Agent 错误已自动重试 (第 ${this.retryCount} 次)`,
+                        `🔄 Antigravity Agent 错误已自动重试 (连续第 ${this.consecutiveRetryCount} 次)`,
                     );
                     this._onRetryTriggered.fire(this.retryCount);
                     this._onErrorDetected.fire({
                         type: 'retry',
-                        count: this.retryCount,
+                        count: this.consecutiveRetryCount,
                     });
+
+                    // When CONSECUTIVE retry count reaches threshold, request a full restart
+                    if (this.consecutiveRetryCount >= this.restartThreshold) {
+                        logWarn(
+                            `⚠️ 连续重试已达 ${this.consecutiveRetryCount} 次 (阈值 ${this.restartThreshold})，请求完全重启 Antigravity`,
+                        );
+                        this._onErrorDetected.fire({
+                            type: 'restart',
+                            count: this.consecutiveRetryCount,
+                        });
+                        this._onRestartRequired.fire(this.consecutiveRetryCount);
+                    }
                     break;
 
                 case 'QUOTA_REACHED':
@@ -162,7 +187,14 @@ export class ErrorWatcher {
                     break;
 
                 case 'NO_ERROR':
-                    // Normal — no error dialog present, do nothing
+                    // Normal — no error dialog present
+                    // Reset consecutive retry count since agent is healthy
+                    if (this.consecutiveRetryCount > 0) {
+                        logInfo(
+                            `Agent 恢复正常，连续重试计数已重置 (之前连续 ${this.consecutiveRetryCount} 次)`,
+                        );
+                        this.consecutiveRetryCount = 0;
+                    }
                     break;
 
                 default:

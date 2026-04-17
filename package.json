@@ -81,6 +81,14 @@
           "maximum": 60,
           "description": "自动重试检测间隔（秒）",
           "order": 10
+        },
+        "feishuBot.autoRestartThreshold": {
+          "type": "number",
+          "default": 10,
+          "minimum": 3,
+          "maximum": 50,
+          "description": "连续重试达到此次数后，自动重启 Antigravity（重载 VS Code 窗口）",
+          "order": 11
         }
       }
     },

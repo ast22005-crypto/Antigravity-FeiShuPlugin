@@ -6,6 +6,7 @@
  * No public IP or domain required.
  */
 
+import * as vscode from 'vscode';
 import { FeishuConfig, FeishuMessage, FeishuTarget } from '../types';
 import { FeishuClient } from './client';
 import { MessageQueue } from '../queue/messageQueue';
@@ -19,6 +20,15 @@ import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
 const FILE_REQUEST_PATTERNS: RegExp[] = [
     /^(?:发送文件|发文件|找文件|查文件|获取文件)\s+(.+)/i,
     /^(?:send\s*file|get\s*file|find\s*file)\s+(.+)/i,
+];
+
+/**
+ * Patterns to detect a restart command.
+ * Matches exactly "重启" (with optional whitespace).
+ */
+const RESTART_PATTERNS: RegExp[] = [
+    /^重启$/,
+    /^restart$/i,
 ];
 
 /** Maximum number of files to list when multiple matches are found */
@@ -183,8 +193,17 @@ export class FeishuListener {
                 }
             }
 
-            // ── Check for file-request command (handled directly, not queued) ──
+            // ── Check for instant commands (handled directly, not queued) ──
             if (msgType === 'text') {
+                // Restart command
+                if (this.isRestartCommand(text)) {
+                    logInfo(`🔄 [${chatType}] 重启指令`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleRestart();
+                    return;
+                }
+
+                // File-request command
                 const fileQuery = this.extractFileQuery(text);
                 if (fileQuery) {
                     logInfo(`📂 [${chatType}] 文件请求: ${fileQuery}`);
@@ -243,6 +262,58 @@ export class FeishuListener {
             }
         } catch (e: any) {
             logError(`消息处理异常: ${e.message}`);
+        }
+    }
+
+    // ── Restart handling ──────────────────────────────────────────────────
+
+    /**
+     * Check if the message is a restart command.
+     */
+    private isRestartCommand(text: string): boolean {
+        const trimmed = text.trim();
+        return RESTART_PATTERNS.some(p => p.test(trimmed));
+    }
+
+    /**
+     * Handle the restart command:
+     *  - Acknowledge to Feishu
+     *  - Reload VS Code window to fully restart Antigravity
+     */
+    private async handleRestart(): Promise<void> {
+        try {
+            const pn = this.config.projectName || 'Project';
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            await this.client.sendCard(
+                `🔄 ${pn} · 收到重启指令`,
+                [
+                    `**项目**：${pn}`,
+                    `**事件**：收到飞书重启指令，即将重载 VS Code 窗口`,
+                    `**时间**：${now}`,
+                    '',
+                    '---',
+                    '> 🔄 窗口即将重载，Antigravity 将完全重启。',
+                ].join('\n'),
+                'blue',
+            );
+
+            // Small delay to let the Feishu message send
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            logInfo('🔄 收到飞书重启指令，正在重载窗口...');
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+        } catch (e: any) {
+            logError(`重启处理失败: ${e.message}`);
+            await this.client.sendText(`❌ 重启失败: ${e.message}`);
         }
     }
 
