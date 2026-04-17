@@ -41,6 +41,7 @@ import {
     disposeLogger,
 } from './utils/logger';
 import { FeishuConfig, FeishuTarget, AgentResponse } from './types';
+import { hardRestartAntigravity } from './utils/restarter';
 
 // ── Module-level references (accessible from command handlers) ────────────
 
@@ -149,6 +150,7 @@ export async function activate(
         feishuClient,
         messageQueue,
         workspaceRoot,
+        context.extensionPath
     );
 
     feishuListener.onConnectionChange(connected => {
@@ -351,8 +353,8 @@ export async function activate(
             // Small delay to let the Feishu message send
             await sleep(2000);
 
-            // Reload the VS Code window — this fully restarts all extensions including Antigravity
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
+            // Reload the VS Code window via detached script — this fully restarts all Antigravity processes
+            hardRestartAntigravity(context.extensionPath);
         });
     }
 

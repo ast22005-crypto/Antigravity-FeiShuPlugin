@@ -12,6 +12,7 @@ import { FeishuClient } from './client';
 import { MessageQueue } from '../queue/messageQueue';
 import { FileSearcher } from '../utils/fileSearcher';
 import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
+import { hardRestartAntigravity } from '../utils/restarter';
 
 /**
  * Regex patterns to detect file-request commands.
@@ -52,6 +53,7 @@ export class FeishuListener {
     private seenIds = new Set<string>();
     private connected = false;
     private workspaceRoot: string;
+    private extensionPath?: string;
     private fileSearcher: FileSearcher;
 
     private onConnectedCb?: (connected: boolean) => void;
@@ -62,11 +64,13 @@ export class FeishuListener {
         client: FeishuClient,
         queue: MessageQueue,
         workspaceRoot?: string,
+        extensionPath?: string,
     ) {
         this.config = config;
         this.client = client;
         this.queue = queue;
         this.workspaceRoot = workspaceRoot || '.';
+        this.extensionPath = extensionPath;
         this.fileSearcher = new FileSearcher(this.workspaceRoot);
     }
 
@@ -327,8 +331,12 @@ export class FeishuListener {
             // Small delay to let the Feishu message send
             await new Promise(resolve => setTimeout(resolve, 2000));
 
-            logInfo('🔄 收到飞书重启指令，正在重载窗口...');
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
+            logInfo('🔄 收到飞书重启指令，即将在后台强刷进程并重载窗口...');
+            if (this.extensionPath) {
+                hardRestartAntigravity(this.extensionPath);
+            } else {
+                vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
         } catch (e: any) {
             logError(`重启处理失败: ${e.message}`);
             await this.client.sendText(`❌ 重启失败: ${e.message}`);
