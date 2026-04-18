@@ -12,7 +12,7 @@ import { FeishuClient } from './client';
 import { MessageQueue } from '../queue/messageQueue';
 import { FileSearcher } from '../utils/fileSearcher';
 import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
-import { hardRestartAntigravity } from '../utils/restarter';
+import { recoverFromAuthError } from '../utils/restarter';
 
 /**
  * Regex patterns to detect file-request commands.
@@ -354,11 +354,11 @@ export class FeishuListener {
                 `🔄 ${pn} · 收到重启指令`,
                 [
                     `**项目**：${pn}`,
-                    `**事件**：收到飞书重启指令，即将重载 VS Code 窗口`,
+                    `**事件**：收到飞书重启指令，即将尝试软重启（账号切换）`,
                     `**时间**：${now}`,
                     '',
                     '---',
-                    '> 🔄 窗口即将重载，Antigravity 将完全重启。',
+                    '> 🔄 尝试跨账号切换兜底，从而恢复认证状态。',
                 ].join('\n'),
                 'blue',
             );
@@ -366,15 +366,17 @@ export class FeishuListener {
             // Small delay to let the Feishu message send
             await new Promise(resolve => setTimeout(resolve, 2000));
 
-            logInfo('🔄 收到飞书重启指令，即将在后台强刷进程并重载窗口...');
-            if (this.extensionPath) {
-                hardRestartAntigravity(this.extensionPath);
+            logInfo('🔄 收到飞书重启指令，尝试执行软重启...');
+            
+            const result = await recoverFromAuthError();
+            if (result === 'switched') {
+                await this.client.sendText('✅ 软重启成功：已通过无缝切换账号完成恢复（零停机）');
             } else {
-                vscode.commands.executeCommand('workbench.action.reloadWindow');
+                await this.client.sendText('❌ 软重启失败：未能切换账号。请确认 Manager 已运行且具备可用账号。');
             }
         } catch (e: any) {
             logError(`重启处理失败: ${e.message}`);
-            await this.client.sendText(`❌ 重启失败: ${e.message}`);
+            await this.client.sendText(`❌ 重启指令处理出错: ${e.message}`);
         }
     }
 

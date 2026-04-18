@@ -11,6 +11,7 @@ Stdout results (same format as auto_retry.ps1):
   RETRY_CLICKED          — Successfully clicked Retry/Continue on Agent error
   QUOTA_REACHED|<detail> — Model quota reached dialog detected
   QUOTA_DISMISSED        — Model quota dialog dismissed
+  AUTH_ERROR|<detail>    — OAuth2/unauthorized_client error detected (needs re-login)
   NO_ERROR               — No error dialog detected
   RETRY_NOT_FOUND        — Error text found but Retry button not located
   INVOKE_FAILED          — Found button but click failed
@@ -175,6 +176,12 @@ def search_tree(elem, depth=0, max_depth=20):
     if "agent terminated due to error" in combined:
         results.append(("ERROR_NOTIFICATION", elem, f"{title}{desc}{value}"))
 
+    # ── 1b. Auth / OAuth2 errors ──────────────────────────────────────
+    if ("unauthorized_client" in combined or
+        "oauth2" in combined and "unauthorized" in combined or
+        "unauthorized" in combined and "request failed" in combined):
+        results.append(("AUTH_ERROR", elem, f"{title}{desc}{value}"))
+
     # ── 2. Quota errors ───────────────────────────────────────────────
     if "model quota reached" in combined or "baseline model quota reached" in combined:
         results.append(("QUOTA", elem, f"{title}{desc}{value}"))
@@ -274,9 +281,16 @@ def main():
 
     # Classify findings
     has_notification_error = any(r[0] == "ERROR_NOTIFICATION" for r in all_results)
+    has_auth_error = any(r[0] == "AUTH_ERROR" for r in all_results)
     has_quota = any(r[0] == "QUOTA" for r in all_results)
     retry_candidates = [(r[1], r[2]) for r in all_results if r[0] == "RETRY_CANDIDATE"]
     buttons = {r[2]: r[1] for r in all_results if r[0] == "BUTTON"}
+
+    # ── 0. Handle auth errors (highest priority) ──────────────────────
+    if has_auth_error:
+        detail = next((r[2] for r in all_results if r[0] == "AUTH_ERROR"), "")
+        print(f"AUTH_ERROR|{detail}")
+        return
 
     # ── 1. Handle quota ────────────────────────────────────────────────
     quota_not_found = False

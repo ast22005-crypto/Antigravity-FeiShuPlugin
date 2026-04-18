@@ -26,6 +26,7 @@ import { FeishuListener } from './feishu/listener';
 import { MessageQueue } from './queue/messageQueue';
 import { AgentBridge } from './agent/bridge';
 import { ErrorWatcher } from './agent/errorWatcher';
+import { OutputWatcher } from './agent/outputWatcher';
 import { SkillInjector } from './agent/skillInjector';
 import { StatusBar } from './ui/statusBar';
 import {
@@ -41,7 +42,7 @@ import {
     disposeLogger,
 } from './utils/logger';
 import { FeishuConfig, FeishuTarget, AgentResponse } from './types';
-import { hardRestartAntigravity } from './utils/restarter';
+import { recoverFromAuthError, RecoveryResult } from './utils/restarter';
 
 // ── Module-level references (accessible from command handlers) ────────────
 
@@ -53,10 +54,14 @@ let statusBar: StatusBar | undefined;
 let msgTreeProvider: MessageTreeProvider | undefined;
 let connStatusProvider: ConnectionStatusProvider | undefined;
 let responseWatcher: vscode.FileSystemWatcher | undefined;
+let responsePollingTimer: ReturnType<typeof setInterval> | undefined;
+let isHandlingResponse = false;
 let errorWatcher: ErrorWatcher | undefined;
+let outputWatcher: OutputWatcher | undefined;
 let processingTimeoutTimer: ReturnType<typeof setInterval> | undefined;
 
 const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const RESPONSE_POLL_INTERVAL_MS = 10_000; // 10 seconds
 
 // ── Activate ──────────────────────────────────────────────────────────────
 
@@ -316,7 +321,7 @@ export async function activate(
         errorWatcher.start();
         context.subscriptions.push({ dispose: () => errorWatcher!.dispose() });
 
-        // When retry count reaches threshold, restart Antigravity (reload window)
+        // When retry count reaches threshold, attempt account switching (soft restart)
         errorWatcher.onRestartRequired(async (count) => {
             const pn = getProjectName(config);
             const now = new Date().toLocaleString('zh-CN', {
@@ -330,21 +335,21 @@ export async function activate(
             });
 
             logWarn(
-                `🔄 重试已达 ${count} 次，即将重载 VS Code 窗口以完全重启 Antigravity...`,
+                `🔄 重试已达 ${count} 次，即将尝试账号切换兜底...`,
             );
 
-            // Notify Feishu before restarting
+            // Notify Feishu before soft restarting
             if (feishuClient?.hasTarget()) {
                 await feishuClient.sendCard(
-                    `🔄 ${pn} · Antigravity 即将完全重启`,
+                    `🔄 ${pn} · 尝试软重启 (账号切换)`,
                     [
                         `**项目**：${pn}`,
-                        `**事件**：连续重试已达 **${count}** 次，自动触发完全重启`,
-                        `**操作**：重载 VS Code 窗口`,
+                        `**事件**：连续重试已达 **${count}** 次`,
+                        `**操作**：尝试无缝账号切换以兜底认证状态`,
                         `**时间**：${now}`,
                         '',
                         '---',
-                        '> 🔄 窗口即将重载，Antigravity 将完全重启。如重启后仍频繁异常，请手动检查。',
+                        '> 🔄 尝试执行无缝账号切换。如仍频繁异常，请手动检查。',
                     ].join('\n'),
                     'red',
                 );
@@ -353,10 +358,131 @@ export async function activate(
             // Small delay to let the Feishu message send
             await sleep(2000);
 
-            // Reload the VS Code window via detached script — this fully restarts all Antigravity processes
-            hardRestartAntigravity(context.extensionPath);
+            const result = await recoverFromAuthError();
+            if (feishuClient?.hasTarget()) {
+                if (result === 'switched') {
+                    await feishuClient.sendText('✅ 自动重试达上限：软重启成功，已通过账号切换完成恢复（零停机）。');
+                } else {
+                    await feishuClient.sendText('❌ 自动重试达上限且账号切换失败：请手动介入确认 Manager 状态与账号余量。');
+                }
+            }
+        });
+
+        // When OAuth2/auth error is detected, attempt account switching via Manager
+        errorWatcher.onAuthErrorDetected(async (detail) => {
+            const pn = getProjectName(config);
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            logWarn(
+                `🔐 检测到认证错误 (${detail})，启动三级恢复流程...`,
+            );
+
+            // Notify Feishu that recovery is starting
+            if (feishuClient?.hasTarget()) {
+                await feishuClient.sendCard(
+                    `🔐 ${pn} · Antigravity 认证失效`,
+                    [
+                        `**项目**：${pn}`,
+                        `**事件**：检测到 OAuth2 认证错误 (unauthorized_client)`,
+                        `**操作**：尝试通过 Antigravity-Manager 切换账号`,
+                        `**详情**：${detail}`,
+                        `**时间**：${now}`,
+                    ].join('\n'),
+                    'orange',
+                );
+            }
+
+            // Execute account-switching recovery
+            const result = await recoverFromAuthError();
+
+            // Report result to Feishu
+            if (feishuClient?.hasTarget()) {
+                const resultMessages: Record<RecoveryResult, string> = {
+                    switched: '✅ 已通过 Antigravity-Manager 切换到备用账号（零停机）',
+                    failed: '❌ 切换账号失败，请手动介入（确认 Manager 已运行且有可用备用账号）',
+                };
+                const color = result === 'failed' ? 'red' : 'green';
+                await feishuClient.sendCard(
+                    `🔐 ${pn} · 认证恢复${result === 'failed' ? '失败' : '完成'}`,
+                    [
+                        `**项目**：${pn}`,
+                        `**结果**：${resultMessages[result]}`,
+                        `**时间**：${now}`,
+                    ].join('\n'),
+                    color,
+                );
+            }
         });
     }
+
+    // ── 11b. Output channel auth error monitor ────────────────────────
+
+    outputWatcher = new OutputWatcher();
+    outputWatcher.start();
+    context.subscriptions.push({ dispose: () => outputWatcher!.dispose() });
+
+    outputWatcher.onAuthError(async ({ detail, count }) => {
+        const pn = getProjectName(config);
+        const now = new Date().toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+        });
+
+        logWarn(
+            `🔐 [OutputWatcher] 检测到认证错误 (第 ${count} 次)，启动三级恢复流程...`,
+        );
+
+        // Notify Feishu that recovery is starting
+        if (feishuClient?.hasTarget()) {
+            await feishuClient.sendCard(
+                `🔐 ${pn} · Antigravity 认证失效 (日志检测)`,
+                [
+                    `**项目**：${pn}`,
+                    `**事件**：Output 日志中检测到 OAuth2 认证错误`,
+                    `**操作**：尝试通过 Antigravity-Manager 切换账号`,
+                    `**详情**：${detail.slice(0, 200)}`,
+                    `**累计检测**：第 **${count}** 次`,
+                    `**时间**：${now}`,
+                ].join('\n'),
+                'orange',
+            );
+        }
+
+        // Execute account-switching recovery
+        const result = await recoverFromAuthError();
+
+        // Report result to Feishu
+        if (feishuClient?.hasTarget()) {
+            const resultMessages: Record<RecoveryResult, string> = {
+                switched: '✅ 已通过 Antigravity-Manager 切换到备用账号（零停机）',
+                failed: '❌ 切换账号失败，请手动介入（确认 Manager 已运行且有可用备用账号）',
+            };
+            const color = result === 'failed' ? 'red' : 'green';
+            await feishuClient.sendCard(
+                `🔐 ${pn} · 认证恢复${result === 'failed' ? '失败' : '完成'} (日志检测)`,
+                [
+                    `**项目**：${pn}`,
+                    `**结果**：${resultMessages[result]}`,
+                    `**累计检测**：第 **${count}** 次`,
+                    `**时间**：${now}`,
+                ].join('\n'),
+                color,
+            );
+        }
+    });
 
     // ── 12. Send project-open notification ─────────────────────────────
 
@@ -403,6 +529,113 @@ export async function activate(
 
 // ── Response file watcher ─────────────────────────────────────────────────
 
+/**
+ * Core handler for the Agent response file.
+ * Called by both FileSystemWatcher (primary) and polling timer (fallback).
+ * Guarded by `isHandlingResponse` to prevent double-processing.
+ */
+async function handleResponseFile(
+    responsePath: string,
+    workspaceRoot: string,
+    config: FeishuConfig,
+    source: 'watcher' | 'poll',
+): Promise<void> {
+    // Prevent concurrent handling if both watcher and poller fire
+    if (isHandlingResponse) {
+        return;
+    }
+    isHandlingResponse = true;
+
+    try {
+        // Wait briefly so the file is fully written
+        await sleep(500);
+
+        if (!fs.existsSync(responsePath)) {
+            return;
+        }
+
+        let raw: string;
+        try {
+            raw = fs.readFileSync(responsePath, 'utf-8');
+        } catch {
+            // File might be in the middle of being written; retry once after a delay
+            await sleep(1000);
+            if (!fs.existsSync(responsePath)) {
+                return;
+            }
+            raw = fs.readFileSync(responsePath, 'utf-8');
+        }
+
+        const response: AgentResponse = JSON.parse(raw);
+
+        if (!response.summary) {
+            logWarn('响应文件缺少 summary 字段，跳过');
+            return;
+        }
+
+        logInfo(
+            `检测到 Agent 响应 (via ${source}): ${response.summary.slice(0, 60)}`,
+        );
+
+        // Send result to Feishu
+        if (config.notifyOnCompletion && feishuClient) {
+            const ok = await feishuClient.sendResult(
+                response.summary,
+                response.details,
+                response.files,
+            );
+            if (ok) {
+                logSuccess('处理结果已推送到飞书');
+            } else {
+                logError('推送结果到飞书失败');
+            }
+        }
+
+        // Send files if requested by Agent
+        if (response.sendFiles && response.sendFiles.length > 0 && feishuClient) {
+            logInfo(`Agent 请求发送 ${response.sendFiles.length} 个文件`);
+            for (const filePath of response.sendFiles) {
+                // Resolve relative paths against workspace root
+                const absPath = path.isAbsolute(filePath)
+                    ? filePath
+                    : path.join(workspaceRoot, filePath);
+                const ok = await feishuClient.uploadAndSendFile(absPath);
+                if (!ok) {
+                    logWarn(`文件发送失败: ${filePath}`);
+                }
+            }
+        }
+
+        // Clear queue
+        if (messageQueue) {
+            const remaining = messageQueue.clearProcessed();
+            if (remaining > 0) {
+                logInfo(
+                    `队列中还有 ${remaining} 条新消息，5s 后自动触发下一轮`,
+                );
+                setTimeout(() => agentBridge?.trigger(), 5000);
+            }
+        }
+
+        // Delete the response file
+        try {
+            fs.unlinkSync(responsePath);
+            logInfo('响应文件已清理');
+        } catch {
+            /* ignore */
+        }
+
+        statusBar?.setConnected(
+            messageQueue?.getMessageCount() ?? 0,
+        );
+        refreshConnectionStatus();
+    } catch (e: any) {
+        logError(`处理响应文件失败: ${e.message}`);
+    } finally {
+        isHandlingResponse = false;
+    }
+}
+
 function setupResponseWatcher(
     context: vscode.ExtensionContext,
     workspaceRoot: string,
@@ -413,6 +646,9 @@ function setupResponseWatcher(
         fs.mkdirSync(antigravityDir, { recursive: true });
     }
 
+    const responsePath = path.join(antigravityDir, 'feishu_response.json');
+
+    // ── Primary: FileSystemWatcher ─────────────────────────────────────
     const pattern = new vscode.RelativePattern(
         antigravityDir,
         'feishu_response.json',
@@ -425,87 +661,38 @@ function setupResponseWatcher(
         /* ignoreDelete */ true,
     );
 
-    const handle = async (uri: vscode.Uri) => {
-        // Wait briefly so the file is fully written
-        await sleep(500);
-
-        if (!fs.existsSync(uri.fsPath)) {
-            return;
-        }
-
-        try {
-            const raw = fs.readFileSync(uri.fsPath, 'utf-8');
-            const response: AgentResponse = JSON.parse(raw);
-
-            if (!response.summary) {
-                logWarn('响应文件缺少 summary 字段，跳过');
-                return;
-            }
-
-            logInfo(
-                `检测到 Agent 响应: ${response.summary.slice(0, 60)}`,
-            );
-
-            // Send result to Feishu
-            if (config.notifyOnCompletion && feishuClient) {
-                const ok = await feishuClient.sendResult(
-                    response.summary,
-                    response.details,
-                    response.files,
-                );
-                if (ok) {
-                    logSuccess('处理结果已推送到飞书');
-                } else {
-                    logError('推送结果到飞书失败');
-                }
-            }
-
-            // Send files if requested by Agent
-            if (response.sendFiles && response.sendFiles.length > 0 && feishuClient) {
-                logInfo(`Agent 请求发送 ${response.sendFiles.length} 个文件`);
-                for (const filePath of response.sendFiles) {
-                    // Resolve relative paths against workspace root
-                    const absPath = path.isAbsolute(filePath)
-                        ? filePath
-                        : path.join(workspaceRoot, filePath);
-                    const ok = await feishuClient.uploadAndSendFile(absPath);
-                    if (!ok) {
-                        logWarn(`文件发送失败: ${filePath}`);
-                    }
-                }
-            }
-
-            // Clear queue
-            if (messageQueue) {
-                const remaining = messageQueue.clearProcessed();
-                if (remaining > 0) {
-                    logInfo(
-                        `队列中还有 ${remaining} 条新消息，5s 后自动触发下一轮`,
-                    );
-                    setTimeout(() => agentBridge?.trigger(), 5000);
-                }
-            }
-
-            // Delete the response file
-            try {
-                fs.unlinkSync(uri.fsPath);
-                logInfo('响应文件已清理');
-            } catch {
-                /* ignore */
-            }
-
-            statusBar?.setConnected(
-                messageQueue?.getMessageCount() ?? 0,
-            );
-            refreshConnectionStatus();
-        } catch (e: any) {
-            logError(`处理响应文件失败: ${e.message}`);
-        }
+    const watcherHandle = (uri: vscode.Uri) => {
+        handleResponseFile(uri.fsPath, workspaceRoot, config, 'watcher');
     };
 
-    responseWatcher.onDidCreate(handle);
-    responseWatcher.onDidChange(handle);
+    responseWatcher.onDidCreate(watcherHandle);
+    responseWatcher.onDidChange(watcherHandle);
     context.subscriptions.push(responseWatcher);
+
+    // ── Fallback: Polling timer ────────────────────────────────────────
+    // FileSystemWatcher can miss events during long-running Agent tasks.
+    // Poll every 10s as a reliable fallback.
+    responsePollingTimer = setInterval(() => {
+        if (isHandlingResponse) {
+            return;
+        }
+        try {
+            if (fs.existsSync(responsePath)) {
+                logInfo('⏱️ 轮询检测到响应文件（FileSystemWatcher 可能遗漏）');
+                handleResponseFile(responsePath, workspaceRoot, config, 'poll');
+            }
+        } catch {
+            // Ignore stat errors
+        }
+    }, RESPONSE_POLL_INTERVAL_MS);
+
+    context.subscriptions.push({
+        dispose: () => {
+            if (responsePollingTimer) {
+                clearInterval(responsePollingTimer);
+            }
+        },
+    });
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────
@@ -639,6 +826,17 @@ function registerCommands(
         }
     });
 
+    // Soft restart & test auth recovery
+    push('feishu-bot.restart', async () => {
+        vscode.window.showInformationMessage('🔄 正在尝试执行无缝账号切换...');
+        const result = await recoverFromAuthError();
+        if (result === 'switched') {
+            vscode.window.showInformationMessage('✅ 账号切换成功（零停机）。');
+        } else {
+            vscode.window.showErrorMessage('❌ 账号切换失败，请确认 Manager 状态与可用备用账号。');
+        }
+    });
+
     // Status
     push('feishu-bot.showStatus', () => {
         const items = [
@@ -647,6 +845,7 @@ function registerCommands(
             `待处理: ${messageQueue?.getMessageCount() ?? 0} 条`,
             `Agent: ${messageQueue?.isProcessing() ? '🔄' : '💤'}`,
             `自动重试: ${errorWatcher?.isRunning() ? `✅ (累计 ${errorWatcher.getRetryCount()} 次, 连续 ${errorWatcher.getConsecutiveRetryCount()} 次, 配额 ${errorWatcher.getQuotaCount()} 次)` : '❌'}`,
+            `日志监控: ${outputWatcher ? `✅ (认证错误 ${outputWatcher.getAuthErrorCount()} 次)` : '❌'}`,
         ];
         showOutputChannel();
         logInfo(`飞书状态:\n  ${items.join('\n  ')}`);
@@ -675,7 +874,11 @@ export function deactivate(): void {
     logInfo('飞书机器人插件正在停止...');
     feishuListener?.stop();
     errorWatcher?.dispose();
+    outputWatcher?.dispose();
     messageQueue?.dispose();
     responseWatcher?.dispose();
+    if (responsePollingTimer) {
+        clearInterval(responsePollingTimer);
+    }
     disposeLogger();
 }

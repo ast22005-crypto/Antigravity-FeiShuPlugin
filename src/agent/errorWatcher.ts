@@ -24,7 +24,7 @@ const EXEC_TIMEOUT_MS_WIN = 10_000;       // single-run timeout (Windows)
 const EXEC_TIMEOUT_MS_MAC = 15_000;       // macOS needs more time for AXManualAccessibility
 
 /** Types of errors detected by the watcher */
-export type ErrorType = 'retry' | 'quota' | 'restart';
+export type ErrorType = 'retry' | 'quota' | 'restart' | 'auth';
 
 export interface ErrorEvent {
     type: ErrorType;
@@ -39,6 +39,7 @@ export class ErrorWatcher {
     private retryCount = 0;
     private consecutiveRetryCount = 0;
     private quotaCount = 0;
+    private authErrorCount = 0;
     private intervalMs: number;
     private restartThreshold: number;
     private platform: NodeJS.Platform;
@@ -54,6 +55,10 @@ export class ErrorWatcher {
     /** Fires when retry count reaches threshold and a full restart is needed. */
     private _onRestartRequired = new vscode.EventEmitter<number>();
     readonly onRestartRequired = this._onRestartRequired.event;
+
+    /** Fires when an OAuth2/auth error is detected (needs credential clearing + restart). */
+    private _onAuthErrorDetected = new vscode.EventEmitter<string>();
+    readonly onAuthErrorDetected = this._onAuthErrorDetected.event;
 
     constructor(extensionPath: string, intervalMs?: number, restartThreshold?: number) {
         this.platform = process.platform;
@@ -121,6 +126,7 @@ export class ErrorWatcher {
         this._onRetryTriggered.dispose();
         this._onErrorDetected.dispose();
         this._onRestartRequired.dispose();
+        this._onAuthErrorDetected.dispose();
     }
 
     // ── Core check ────────────────────────────────────────────────────────
@@ -193,6 +199,22 @@ export class ErrorWatcher {
                         count: this.quotaCount,
                         detail: detail || undefined,
                     });
+                    break;
+
+                case 'AUTH_ERROR':
+                    this.authErrorCount++;
+                    logError(
+                        `🔐 检测到 OAuth2 认证错误 (第 ${this.authErrorCount} 次): ${detail || 'unauthorized_client'}`,
+                    );
+                    vscode.window.showErrorMessage(
+                        `🔐 Antigravity 认证失效 (unauthorized_client)，即将清除凭据并重启...`,
+                    );
+                    this._onErrorDetected.fire({
+                        type: 'auth',
+                        count: this.authErrorCount,
+                        detail: detail || 'unauthorized_client',
+                    });
+                    this._onAuthErrorDetected.fire(detail || 'unauthorized_client');
                     break;
 
                 case 'QUOTA_NOT_FOUND':

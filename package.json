@@ -3,6 +3,10 @@
   "displayName": "飞书机器人 (Feishu Bot)",
   "description": "飞书双向集成：接收消息 → Antigravity Agent 处理 → 推送结果",
   "version": "1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ast22005-crypto/Antigravity-FeiShuPlugin"
+  },
   "publisher": "stone",
   "engines": {
     "vscode": "^1.90.0"
@@ -89,6 +93,20 @@
           "maximum": 50,
           "description": "连续重试达到此次数后，自动重启 Antigravity（重载 VS Code 窗口）",
           "order": 11
+        },
+        "feishuBot.managerPort": {
+          "type": "number",
+          "default": 8045,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Antigravity-Manager 本地 API 端口（用于认证失败时自动切换账号）",
+          "order": 12
+        },
+        "feishuBot.managerApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Antigravity-Manager API Key（如果 Manager 配置了鉴权则填写）",
+          "order": 13
         }
       }
     },
@@ -131,6 +149,10 @@
         "command": "feishu-bot.openSettings",
         "title": "飞书: 打开设置",
         "icon": "$(gear)"
+      },
+      {
+        "command": "feishu-bot.restart",
+        "title": "飞书: 重启 Agent / 测试切换账号"
       }
     ],
     "viewsContainers": {
@@ -173,7 +195,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "prepackage": "npm run compile",
-    "package": "npx @vscode/vsce package --no-dependencies"
+    "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

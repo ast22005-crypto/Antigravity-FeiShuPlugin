@@ -5,6 +5,7 @@
 #   RETRY_CLICKED          — Successfully clicked Retry on Agent error
 #   QUOTA_REACHED|<detail> — Model quota reached dialog detected (with detail text)
 #   QUOTA_DISMISSED        — Model quota dialog dismissed
+#   AUTH_ERROR|<detail>    — OAuth2/unauthorized_client error detected (needs re-login)
 #   NO_ERROR               — No error dialog detected
 #   RETRY_NOT_FOUND        — Error text found but Retry button not located
 #   INVOKE_FAILED          — Found button but click failed
@@ -49,6 +50,39 @@ function Invoke-Button($button) {
         return $false
     }
 }
+
+# ── 0. Check for Auth / OAuth2 errors (highest priority) ──────────────────
+
+$windowCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Window)
+
+$textCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Text)
+
+try {
+    # Limit search to VS Code / Cursor windows to avoid scanning the entire desktop text
+    $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $windowCondition)
+    foreach ($w in $windows) {
+        $wName = $w.Current.Name
+        if ($wName -and ($wName.Contains("Visual Studio Code") -or $wName.Contains("Cursor"))) {
+            $textElements = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)
+            foreach ($te in $textElements) {
+                $text = $te.Current.Name
+                if ($text) {
+                    $lowerText = $text.ToLower()
+                    if ($lowerText.Contains("unauthorized_client") -or 
+                        ($lowerText.Contains("oauth2") -and $lowerText.Contains("unauthorized")) -or 
+                        ($lowerText.Contains("unauthorized") -and $lowerText.Contains("request failed"))) {
+                        Write-Output "AUTH_ERROR|$text"
+                        exit 0
+                    }
+                }
+            }
+        }
+    }
+} catch { }
 
 # ── 1. Check for "Model quota reached" dialog ─────────────────────────────
 
