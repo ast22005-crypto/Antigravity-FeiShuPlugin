@@ -17,13 +17,16 @@
 | 🤖 **AI Agent 自动触发** | 收到消息后自动唤起 Antigravity Agent 处理任务 |
 | 📁 **文件传输** | 在飞书中发送 `发送文件 xxx` 即可获取项目文件 |
 | 🔄 **错误自动重试** | 通过 UI Automation 自动点击 Retry 按钮（Windows / macOS），并同步重试次数到飞书 |
-| 🔑 **鉴权异常恢复** | 智能检测 OAuth2 等授权错误，自动对接 Manager API 无缝切换备用账号或刷新令牌 |
-| 🔌 **自动/手动重启** | 支持手动发送 `重启` 指令，或连续重试达阈值后自动重载恢复工作流 |
+| 🔑 **三级鉴权恢复** | 双通道检测 OAuth2 授权异常（UI 对话框 + Output 日志），自动对接 Antigravity-Manager API 无缝切换备用账号 |
+| 🔌 **软重启（零停机）** | 手动发送 `重启` 指令或连续重试达阈值时，自动通过 Manager 切换账号恢复，无需重载窗口 |
 | 🎛️ **模型热切换** | 在飞书中发送指令，全自动跨平台选用并切换 Antigravity 主要/计划模型 |
 | 🚫 **配额异常通知** | 检测到 Model quota reached 时自动通知飞书 |
 | 📋 **消息队列管理** | 支持消息排队、去重、超时保护、自动批处理 |
 | 🧠 **Skill 自动注入** | 自动生成 SKILL.md，让 Agent 理解飞书工作流 |
 | 🎯 **状态栏 & 侧边栏** | 实时显示连接状态、消息队列、处理进度 |
+| 🛠️ **JSON 自动修复** | 多策略解析 Agent 响应 JSON（直接解析 → 迭代位置修复 → 正则兜底），容忍 AI 生成的转义错误 |
+| 📡 **Output 日志监控** | 实时监听 Antigravity Output Channel 日志，比 UI 检测更快发现认证失败 |
+| 🔁 **响应文件双重检测** | FileSystemWatcher（主）+ 10 秒轮询（备），确保长时间 Agent 任务后响应不遗漏 |
 
 ---
 
@@ -47,12 +50,18 @@
 │  ┌──────────┐  ┌────────────┐  ┌─────────▼─────────┐       │
 │  │  Client  │← │ Response   │← │  Antigravity AI   │       │
 │  │ (API发送)│  │  Watcher   │  │     Agent         │       │
+│  └──────────┘  └─┬──────────┘  └───────────────────┘       │
+│                  │ (FSWatcher + 轮询)                       │
+│  ┌──────────┐  ┌─┴──────────┐  ┌───────────────────┐       │
+│  │StatusBar │  │ Tree View  │  │  Error Watcher    │       │
+│  │ (状态栏) │  │ (侧边栏)  │  │  (UI 自动重试)    │       │
 │  └──────────┘  └────────────┘  └───────────────────┘       │
 │                                                             │
 │  ┌──────────┐  ┌────────────┐  ┌───────────────────┐       │
-│  │StatusBar │  │ Tree View  │  │  Error Watcher    │       │
-│  │ (状态栏) │  │ (侧边栏)  │  │  (自动重试)       │       │
-│  └──────────┘  └────────────┘  └───────────────────┘       │
+│  │ Output   │  │ Manager    │  │   JSON Repair     │       │
+│  │ Watcher  │  │ Client     │  │  (多策略修复)     │       │
+│  │(日志监控)│  │(多账号切换)│  └───────────────────┘       │
+│  └──────────┘  └────────────┘                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -122,7 +131,9 @@ npm run package
 | `feishuBot.triggerCooldown` | number | `10` | 自动触发冷却时间（秒） |
 | `feishuBot.autoRetryOnError` | boolean | `true` | Agent 出错时自动 Retry |
 | `feishuBot.autoRetryInterval` | number | `15` | 自动重试检测间隔（秒） |
-| `feishuBot.autoRestartThreshold`| number | `10` | 连续重试达到此次数后，自动重启 Antigravity |
+| `feishuBot.autoRestartThreshold`| number | `10` | 连续重试达到此次数后，自动通过 Manager 切换账号恢复 |
+| `feishuBot.managerPort` | number | `8045` | Antigravity-Manager 本地 API 端口（用于认证失败时自动切换账号） |
+| `feishuBot.managerApiKey` | string | `""` | Antigravity-Manager API Key（如果 Manager 配置了鉴权则填写） |
 
 ### 4. 开始使用
 
@@ -169,15 +180,17 @@ send file extension.ts
 - 支持模糊搜索（部分文件名匹配）
 - 单文件大小限制 30 MB
 
-#### 2. 服务重启
+#### 2. 软重启（账号切换）
 
 直接发送：
 
 ```text
 重启
+restart
 ```
 
-- 插件将立即重载 VS Code 窗口，完全重启 Antigravity Agent 并恢复后续队列。
+- 插件将通过 Antigravity-Manager 执行**软重启**（零停机账号切换），无需重载 VS Code 窗口。
+- 成功后自动通知飞书切换结果；如 Manager 不可用或无备用账号，则回报失败。
 
 #### 3. 开启新对话
 
@@ -224,6 +237,10 @@ Agent 处理完飞书任务后，需要在工作区创建 `.antigravity/feishu_r
 5. 删除响应文件
 6. 如有新消息排队，自动触发下一轮处理
 
+> 📝 **JSON 容错解析**：Agent 生成的响应 JSON 如果包含未转义的双引号等常见错误，
+> 插件会自动通过**三种策略**修复（直接解析 → 迭代位置修复 → 正则字段提取），
+> 最大程度保证响应不丢失。
+
 ---
 
 ## 🔧 项目结构
@@ -237,19 +254,23 @@ FeiShuPlugin/
 │   │   └── configManager.ts    # VS Code Settings 读取
 │   ├── feishu/
 │   │   ├── client.ts           # 飞书 REST API 客户端（Token / 消息 / 文件上传）
-│   │   └── listener.ts         # WebSocket 消息监听 + 文件请求处理
+│   │   └── listener.ts         # WebSocket 消息监听 + 即时指令处理
 │   ├── queue/
 │   │   └── messageQueue.ts     # 消息队列（内存 + 文件持久化）
 │   ├── agent/
 │   │   ├── bridge.ts           # Agent 触发桥接（命令自动发现）
-│   │   ├── errorWatcher.ts     # 错误对话框自动重试（PowerShell）
+│   │   ├── errorWatcher.ts     # UI 错误对话框检测 + 自动重试（跨平台）
+│   │   ├── outputWatcher.ts    # Output Channel 日志实时监控（认证错误检测）
 │   │   └── skillInjector.ts    # SKILL.md 自动注入
 │   ├── ui/
 │   │   ├── statusBar.ts        # 底部状态栏
 │   │   └── treeView.ts         # 侧边栏消息列表 & 连接状态
 │   └── utils/
 │       ├── logger.ts           # 输出通道日志
-│       └── fileSearcher.ts     # 工作区文件搜索
+│       ├── fileSearcher.ts     # 工作区文件搜索
+│       ├── jsonRepair.ts       # JSON 多策略容错解析（AI 生成内容修复）
+│       ├── managerClient.ts    # Antigravity-Manager 本地 API 客户端
+│       └── restarter.ts        # 认证恢复（Keychain 清理 + Manager 账号切换）
 ├── resources/
 │   ├── feishu-icon.svg         # 侧边栏图标
 │   ├── auto_retry.ps1          # Windows UI Automation 重试脚本
@@ -257,7 +278,7 @@ FeiShuPlugin/
 │   ├── select_model.ps1        # Windows 模型热切换自动化脚本
 │   ├── select_model_mac.py     # macOS 模型热切换自动化脚本 (Python)
 │   ├── hard_restart.ps1        # Windows 硬重启脚本
-│   ├── hard_restart_mac.sh     # macOS 硬重启脚本
+│   └── hard_restart_mac.sh     # macOS 硬重启脚本
 ├── package.json                # 插件清单 & 配置声明
 └── tsconfig.json               # TypeScript 编译配置
 ```
@@ -270,13 +291,16 @@ FeiShuPlugin/
 |------|------|
 | **消息去重** | 基于 `messageId` 的内存 + 队列双重去重 |
 | **处理超时保护** | 5 分钟超时自动释放 processing 锁 |
-| **错误重试与重启** | 跨平台脚本自动点击 Retry 并同步次数，连续重试达阈值自动重载恢复 |
-| **智能鉴权恢复** | 检测到授权失效（OAuth2）时，执行「多账号无缝切换 -> 触发令牌刷新 -> 后备扩展重启」的三阶恢复策略 |
+| **错误重试与重启** | 跨平台脚本自动点击 Retry 并同步次数，连续重试达阈值自动通过 Manager 切换账号恢复 |
+| **双通道鉴权检测** | 同时通过 UI 对话框（ErrorWatcher）和 Output 日志（OutputWatcher）检测 OAuth2/认证错误，30 秒去抖避免重复触发 |
+| **三级鉴权恢复** | 检测到授权失效时，执行「智能推荐切换 → 手动账号轮替 → 飞书通知介入」的三级恢复策略（通过 Antigravity-Manager API） |
 | **配额异常通知** | 检测到 Model quota reached 时推送飞书通知 |
 | **冷却机制** | 可配置的触发冷却时间，防止短时间内重复触发 |
 | **队列持久化** | 消息队列写入 `.antigravity/feishu_messages.json`，重启不丢失 |
 | **连续处理** | 处理完成后自动检查队列，如有新消息自动触发下一轮 |
 | **残留锁清理** | 启动时自动检测并清理上次残留的 processing 锁 |
+| **JSON 容错解析** | 三策略修复 AI 生成的 JSON（直接解析 → 基于错误位置迭代修复未转义引号 → 正则提取字段兜底） |
+| **响应双重检测** | FileSystemWatcher（主）+ 10 秒轮询定时器（備），防止长时间任务后 FSWatcher 事件丢失 |
 
 ---
 
@@ -316,10 +340,11 @@ npm run package
 ## ⚠️ 注意事项
 
 - **自动重试平台支持**: 错误自动重试功能支持 Windows（UI Automation）和 macOS（Python + macOS Accessibility API）。Linux 上该功能不可用，但不影响其他功能正常工作。
-- **macOS 辅助功能权限**: 在 macOS 上使用自动重试功能，需要在 **系统设置 → 隐私与安全 → 辅助功能** 中授权 Antigravity 应用。macOS 需要系统自带的 Python 3。
-- **安全提醒**: App Secret 等敏感凭证存储在 VS Code Settings 中，请勿将 `.vscode/settings.json` 提交到公开仓库。
+- **macOS 辅助功能权限**: 在 macOS 上使用自动重试和模型热切换功能，需要在 **系统设置 → 隐私与安全 → 辅助功能** 中授权 Antigravity 应用。macOS 需要系统自带的 Python 3。
+- **Antigravity-Manager**: 认证恢复功能依赖本地运行的 [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)。Manager 未运行时认证恢复将失败（插件会通知飞书），但不影响其他功能。
+- **安全提醒**: App Secret、Manager API Key 等敏感凭证存储在 VS Code Settings 中，请勿将 `.vscode/settings.json` 提交到公开仓库。
 - **飞书应用权限**: 确保飞书应用已开通所需的 API 权限并发布了可用版本。
-- **网络要求**: WebSocket 连接需要能访问 `open.feishu.cn`。
+- **网络要求**: WebSocket 连接需要能访问 `open.feishu.cn`；Manager API 通过 `127.0.0.1` 本地通信，无外网需求。
 
 ---
 
