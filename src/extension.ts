@@ -43,6 +43,7 @@ import {
 } from './utils/logger';
 import { FeishuConfig, FeishuTarget, AgentResponse } from './types';
 import { recoverFromAuthError, RecoveryResult } from './utils/restarter';
+import { safeJsonParse } from './utils/jsonRepair';
 
 // ── Module-level references (accessible from command handlers) ────────────
 
@@ -566,7 +567,7 @@ async function handleResponseFile(
             raw = fs.readFileSync(responsePath, 'utf-8');
         }
 
-        const response: AgentResponse = JSON.parse(raw);
+        const response: AgentResponse = safeJsonParse<AgentResponse>(raw);
 
         if (!response.summary) {
             logWarn('响应文件缺少 summary 字段，跳过');
