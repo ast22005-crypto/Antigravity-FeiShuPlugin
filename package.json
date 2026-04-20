@@ -154,6 +154,10 @@
       {
         "command": "feishu-bot.restart",
         "title": "飞书: 重启 Agent / 测试切换账号"
+      },
+      {
+        "command": "feishu-bot.accountData",
+        "title": "飞书: 查看账号配额数据"
       }
     ],
     "viewsContainers": {

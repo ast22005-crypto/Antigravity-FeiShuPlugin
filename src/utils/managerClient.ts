@@ -23,13 +23,35 @@ const DEFAULT_MANAGER_PORT = 8045;
 /** HTTP request timeout in milliseconds */
 const REQUEST_TIMEOUT_MS = 5_000;
 
+/** Manager Model Data*/
+export interface ManagerModel {
+    name: string;
+    percentage: number;
+    reset_time: string;
+}
+
+/** Manager Quota Data*/
+export interface ManagerQuota {
+    models: ManagerModel[];
+    last_updated: number;
+    is_forbidden: boolean;
+}
+
 /** Account info returned by Manager API */
 export interface ManagerAccount {
     id: string;
     email?: string;
     is_current: boolean;
     health?: 'ok' | 'banned' | 'expired' | 'unknown';
-    quota_remaining?: number;
+    quota: ManagerQuota;
+}
+
+
+
+/** Accounts data returned by Manager API */
+export interface ManagerAccounts {
+    current_account_id: string;
+    accounts: ManagerAccount[];
 }
 
 /** health info returned by Manager API */
@@ -185,7 +207,7 @@ export async function getCurrentAccount(): Promise<ManagerAccount> {
 export async function getAccounts(): Promise<ManagerAccount[]> {
     logInfo('[ManagerClient] 获取账号列表...');
 
-    const result = await managerRequest<ManagerAccount[]>('GET', '/api/accounts');
+    const result = await managerRequest<ManagerAccounts>('GET', '/api/accounts');
 
     if (!result.success || !result.data) {
         logWarn(`[ManagerClient] 获取账号列表失败: ${result.error || 'unknown'}`);
@@ -193,7 +215,7 @@ export async function getAccounts(): Promise<ManagerAccount[]> {
     }
 
     // Handle both array responses and wrapped responses
-    const accounts = Array.isArray(result.data) ? result.data : [];
+    const accounts = Array.isArray(result.data.accounts) ? result.data.accounts : [];
     logInfo(`[ManagerClient] 获取到 ${accounts.length} 个账号`);
     return accounts;
 }
@@ -230,7 +252,15 @@ export async function switchToNextAccount(): Promise<boolean> {
 
     // Pick the one with the highest remaining quota, or the first one
     const target = candidates.reduce((best, cur) => {
-        if ((cur.quota_remaining ?? 0) > (best.quota_remaining ?? 0)) {
+        var cur_quota_remaining = 0;
+        var best_quota_remaining = 0;
+        cur.quota?.models.forEach(model => {
+            cur_quota_remaining += model.percentage;
+        });
+        best.quota?.models.forEach(model => {
+            best_quota_remaining += model.percentage;
+        })
+        if ((cur_quota_remaining ?? 0) > (best_quota_remaining ?? 0)) {
             return cur;
         }
         return best;

@@ -13,6 +13,7 @@ import { MessageQueue } from '../queue/messageQueue';
 import { FileSearcher } from '../utils/fileSearcher';
 import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
 import { recoverFromAuthError } from '../utils/restarter';
+import { getAccounts, switchToAccount } from '../utils/managerClient';
 
 /**
  * Regex patterns to detect file-request commands.
@@ -57,6 +58,24 @@ const SWITCH_MODEL_PATTERNS: RegExp[] = [
 const SWITCH_PLAN_MODEL_PATTERNS: RegExp[] = [
     /^(?:切换计划模型|修改计划模型|使用计划模型)\s+(.+)/i,
     /^(?:switch\s*plan\s*model|set\s*plan\s*model)\s+(.+)/i,
+];
+
+/**
+ * Patterns to detect an account data query command.
+ * Matches "账号", "账号数据", "配额", "account data", etc.
+ */
+const ACCOUNT_DATA_PATTERNS: RegExp[] = [
+    /^(?:账号|账号数据|配额|查看账号|查看配额)$/,
+    /^(?:account\s*data|accounts|quota)$/i,
+];
+
+/**
+ * Patterns to detect a switch account command.
+ * Captures the email address after the command keyword.
+ */
+const SWITCH_ACCOUNT_PATTERNS: RegExp[] = [
+    /^(?:切换账号|切账号|使用账号)\s+(.+)/i,
+    /^(?:switch\s*account|use\s*account)\s+(.+)/i,
 ];
 
 /** Maximum number of files to list when multiple matches are found */
@@ -257,6 +276,23 @@ export class FeishuListener {
                     logInfo(`🤖 [${chatType}] 切换计划模型指令: ${planModelQuery}`);
                     this.client.sendReaction(msgId, 'OK');
                     this.handleSwitchPlanModel(planModelQuery);
+                    return;
+                }
+
+                // Switch account command
+                const switchAccountEmail = this.extractSwitchAccountCommand(text);
+                if (switchAccountEmail) {
+                    logInfo(`🔀 [${chatType}] 切换账号指令: ${switchAccountEmail}`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleSwitchAccount(switchAccountEmail);
+                    return;
+                }
+
+                // Account data command
+                if (this.isAccountDataCommand(text)) {
+                    logInfo(`📊 [${chatType}] 账号数据查询指令`);
+                    this.client.sendReaction(msgId, 'OK');
+                    this.handleAccountData();
                     return;
                 }
 
@@ -595,6 +631,178 @@ export class FeishuListener {
         } catch (e: any) {
             logError(`唤醒计划模型选择面板遇到错误: ${e.message}`);
             await this.client.sendText(`❌ 计划模型切换指令失败: ${e.message}`);
+        }
+    }
+
+    // ── Account data handling ─────────────────────────────────────────────
+
+    /**
+     * Check if the message is an account data query command.
+     */
+    private isAccountDataCommand(text: string): boolean {
+        const trimmed = text.trim();
+        return ACCOUNT_DATA_PATTERNS.some(p => p.test(trimmed));
+    }
+
+    /**
+     * Handle the account data command:
+     *  - Fetch all accounts from Manager
+     *  - Extract gemini-3.1-pro-high and claude-opus-4-6-thinking percentages
+     *  - Send report card to Feishu
+     */
+    private async handleAccountData(): Promise<void> {
+        try {
+            const accounts = await getAccounts();
+            if (accounts.length === 0) {
+                await this.client.sendText('❌ 未获取到任何账号数据（Manager 可能未运行）');
+                return;
+            }
+
+            const TARGET_MODELS = ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking'];
+
+            const lines: string[] = [];
+            for (const account of accounts) {
+                const email = account.email || account.id;
+                const currentTag = account.is_current ? ' 🟢' : '';
+                lines.push(`**${email}**${currentTag}`);
+
+                for (const modelName of TARGET_MODELS) {
+                    const model = account.quota?.models?.find(m => m.name === modelName);
+                    const pct = model ? `${model.percentage}%` : 'N/A';
+                    let reset_time = 'N/A';
+                    if (model?.reset_time) {
+                        // API returns UTC time — convert to local timezone
+                        const utcDate = new Date(model.reset_time.endsWith('Z') ? model.reset_time : model.reset_time + 'Z');
+                        reset_time = utcDate.toLocaleString('zh-CN', {
+                            year: 'numeric', month: '2-digit', day: '2-digit',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit',
+                            hour12: false,
+                        });
+                    }
+                    lines.push(`  · \`${modelName}\`: **${pct}** (重置时间: ${reset_time})`);
+                }
+                lines.push('');
+            }
+
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            await this.client.sendCard(
+                `📊 账号配额报告`,
+                [
+                    `**账号总数**：${accounts.length}`,
+                    '',
+                    '---',
+                    '',
+                    ...lines,
+                    '---',
+                    `**⏰ 查询时间**：${now}`,
+                ].join('\n'),
+                'blue',
+            );
+
+            logSuccess('账号配额数据已通过飞书指令发送');
+        } catch (e: any) {
+            logError(`账号数据查询失败: ${e.message}`);
+            await this.client.sendText(`❌ 获取账号数据失败: ${e.message}`);
+        }
+    }
+
+    // ── Switch account handling ───────────────────────────────────────────
+
+    /**
+     * Extract the email from a switch-account command.
+     * Returns null if the message is not a switch account request.
+     */
+    private extractSwitchAccountCommand(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of SWITCH_ACCOUNT_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match && match[1]) {
+                return match[1].trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle the switch account command:
+     *  - Fetch all accounts from Manager
+     *  - Find the account matching the given email
+     *  - Switch to that account
+     *  - Report result to Feishu
+     */
+    private async handleSwitchAccount(email: string): Promise<void> {
+        try {
+            const accounts = await getAccounts();
+            if (accounts.length === 0) {
+                await this.client.sendText('❌ 未获取到任何账号数据（Manager 可能未运行）');
+                return;
+            }
+
+            // Find account by email (case-insensitive partial match)
+            const emailLower = email.toLowerCase();
+            const target = accounts.find(
+                a => a.email?.toLowerCase() === emailLower,
+            ) || accounts.find(
+                a => a.email?.toLowerCase().includes(emailLower),
+            );
+
+            if (!target) {
+                const availableEmails = accounts
+                    .map(a => `• \`${a.email || a.id}\`${a.is_current ? ' 🟢' : ''}`)
+                    .join('\n');
+                await this.client.sendCard(
+                    '❌ 未找到匹配的账号',
+                    [
+                        `未找到邮箱匹配「${email}」的账号。`,
+                        '',
+                        '**可用账号：**',
+                        availableEmails,
+                        '',
+                        '💡 请使用完整邮箱名，例如：`切换账号 user@gmail.com`',
+                    ].join('\n'),
+                    'orange',
+                );
+                return;
+            }
+
+            if (target.is_current) {
+                await this.client.sendText(`ℹ️ 账号 \`${target.email}\` 已经是当前活跃账号，无需切换。`);
+                return;
+            }
+
+            const pn = this.config.projectName || 'Project';
+            await this.client.sendText(`🔄 正在切换到账号: ${target.email}...`);
+
+            const ok = await switchToAccount(target.id, target.email);
+
+            if (ok) {
+                await this.client.sendCard(
+                    `✅ ${pn} · 账号切换成功`,
+                    [
+                        `**目标账号**：${target.email}`,
+                        `**状态**：已成功切换`,
+                        '',
+                        '---',
+                        '> 💡 新账号已生效，后续操作将使用该账号。',
+                    ].join('\n'),
+                    'green',
+                );
+                logSuccess(`飞书指令切换账号成功: ${target.email}`);
+            } else {
+                await this.client.sendText(`❌ 切换到账号 \`${target.email}\` 失败，请检查 Manager 状态。`);
+            }
+        } catch (e: any) {
+            logError(`切换账号失败: ${e.message}`);
+            await this.client.sendText(`❌ 切换账号失败: ${e.message}`);
         }
     }
 
