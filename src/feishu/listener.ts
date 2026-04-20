@@ -61,12 +61,13 @@ const SWITCH_PLAN_MODEL_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Patterns to detect an account data query command.
- * Matches "账号", "账号数据", "配额", "account data", etc.
+ * Unified patterns for account commands.
+ * No argument → query account data.
+ * With argument → switch to matching account (by email or index number).
  */
-const ACCOUNT_DATA_PATTERNS: RegExp[] = [
-    /^(?:账号|账号数据|配额|查看账号|查看配额)$/,
-    /^(?:account\s*data|accounts|quota)$/i,
+const ACCOUNT_PATTERNS: RegExp[] = [
+    /^(?:账号|账号数据|配额|查看账号|查看配额)(?:\s+(.+))?$/,
+    /^(?:account\s*data|accounts|quota)(?:\s+(.+))?$/i,
 ];
 
 /**
@@ -279,7 +280,7 @@ export class FeishuListener {
                     return;
                 }
 
-                // Switch account command
+                // Switch account command (explicit: 切换账号 xxx)
                 const switchAccountEmail = this.extractSwitchAccountCommand(text);
                 if (switchAccountEmail) {
                     logInfo(`🔀 [${chatType}] 切换账号指令: ${switchAccountEmail}`);
@@ -288,11 +289,17 @@ export class FeishuListener {
                     return;
                 }
 
-                // Account data command
-                if (this.isAccountDataCommand(text)) {
-                    logInfo(`📊 [${chatType}] 账号数据查询指令`);
+                // Unified account command: "账号" → query, "账号 xxx" → switch
+                const accountArg = this.extractAccountCommand(text);
+                if (accountArg !== null) {
                     this.client.sendReaction(msgId, 'OK');
-                    this.handleAccountData();
+                    if (accountArg) {
+                        logInfo(`🔀 [${chatType}] 账号指令(切换): ${accountArg}`);
+                        this.handleSwitchAccount(accountArg);
+                    } else {
+                        logInfo(`📊 [${chatType}] 账号数据查询指令`);
+                        this.handleAccountData();
+                    }
                     return;
                 }
 
@@ -637,11 +644,20 @@ export class FeishuListener {
     // ── Account data handling ─────────────────────────────────────────────
 
     /**
-     * Check if the message is an account data query command.
+     * Extract account command argument.
+     * Returns null if not an account command.
+     * Returns '' (empty string) for query-only (no argument).
+     * Returns the argument string for switch target (email or index).
      */
-    private isAccountDataCommand(text: string): boolean {
+    private extractAccountCommand(text: string): string | null {
         const trimmed = text.trim();
-        return ACCOUNT_DATA_PATTERNS.some(p => p.test(trimmed));
+        for (const pattern of ACCOUNT_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match) {
+                return match[1]?.trim() || '';
+            }
+        }
+        return null;
     }
 
     /**
@@ -661,10 +677,11 @@ export class FeishuListener {
             const TARGET_MODELS = ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking'];
 
             const lines: string[] = [];
-            for (const account of accounts) {
+            for (let i = 0; i < accounts.length; i++) {
+                const account = accounts[i];
                 const email = account.email || account.id;
                 const currentTag = account.is_current ? ' 🟢' : '';
-                lines.push(`**${email}**${currentTag}`);
+                lines.push(`**${i + 1}. ${email}**${currentTag}`);
 
                 for (const modelName of TARGET_MODELS) {
                     const model = account.quota?.models?.find(m => m.name === modelName);
@@ -702,6 +719,8 @@ export class FeishuListener {
                     '---',
                     '',
                     ...lines,
+                    '💡 回复 `账号 序号` 或 `账号 邮箱` 可快速切换账号',
+                    '',
                     '---',
                     `**⏰ 查询时间**：${now}`,
                 ].join('\n'),
@@ -747,27 +766,34 @@ export class FeishuListener {
                 return;
             }
 
-            // Find account by email (case-insensitive partial match)
-            const emailLower = email.toLowerCase();
-            const target = accounts.find(
-                a => a.email?.toLowerCase() === emailLower,
-            ) || accounts.find(
-                a => a.email?.toLowerCase().includes(emailLower),
-            );
+            // Check if the input is a number (index from account report)
+            let target: typeof accounts[0] | undefined;
+            const index = parseInt(email, 10);
+            if (!isNaN(index) && String(index) === email.trim() && index >= 1 && index <= accounts.length) {
+                target = accounts[index - 1]; // 1-based index
+            } else {
+                // Find account by email (case-insensitive partial match)
+                const emailLower = email.toLowerCase();
+                target = accounts.find(
+                    a => a.email?.toLowerCase() === emailLower,
+                ) || accounts.find(
+                    a => a.email?.toLowerCase().includes(emailLower),
+                );
+            }
 
             if (!target) {
                 const availableEmails = accounts
-                    .map(a => `• \`${a.email || a.id}\`${a.is_current ? ' 🟢' : ''}`)
+                    .map((a, i) => `${i + 1}. \`${a.email || a.id}\`${a.is_current ? ' 🟢' : ''}`)
                     .join('\n');
                 await this.client.sendCard(
                     '❌ 未找到匹配的账号',
                     [
-                        `未找到邮箱匹配「${email}」的账号。`,
+                        `未找到匹配「${email}」的账号。`,
                         '',
                         '**可用账号：**',
                         availableEmails,
                         '',
-                        '💡 请使用完整邮箱名，例如：`切换账号 user@gmail.com`',
+                        '💡 可使用序号或邮箱，例如：`账号 1` 或 `切换账号 user@gmail.com`',
                     ].join('\n'),
                     'orange',
                 );

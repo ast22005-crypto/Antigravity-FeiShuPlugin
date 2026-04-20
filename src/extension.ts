@@ -856,10 +856,11 @@ function registerCommands(
             const TARGET_MODELS = ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking'];
 
             const lines: string[] = [];
-            for (const account of accounts) {
+            for (let i = 0; i < accounts.length; i++) {
+                const account = accounts[i];
                 const email = account.email || account.id;
                 const currentTag = account.is_current ? ' 🟢' : '';
-                lines.push(`**${email}**${currentTag}`);
+                lines.push(`**${i + 1}. ${email}**${currentTag}`);
 
                 for (const modelName of TARGET_MODELS) {
                     const model = account.quota?.models?.find(m => m.name === modelName);
