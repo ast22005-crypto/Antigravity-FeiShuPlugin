@@ -17,6 +17,9 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { logInfo, logWarn, logError, logSuccess } from './logger';
 
+/** Refresh timeout — quota sync can take a while */
+const REFRESH_TIMEOUT_MS = 30_000;
+
 /** Default Manager API port (as documented in Antigravity-Manager README) */
 const DEFAULT_MANAGER_PORT = 8045;
 
@@ -315,4 +318,158 @@ export async function triggerSmartSwitch(): Promise<boolean> {
     // Fallback to manual next-account switching
     logInfo('[ManagerClient] 智能切换 API 不可用，降级到手动切换...');
     return switchToNextAccount();
+}
+
+/**
+ * Make a long-timeout HTTP request for refresh operations.
+ * Quota refresh may take 10-30s as the Manager contacts upstream APIs.
+ */
+function managerRefreshRequest<T>(
+    method: 'GET' | 'POST' | 'PUT',
+    path: string,
+    body?: Record<string, unknown>,
+): Promise<ManagerResponse<T>> {
+    return new Promise((resolve) => {
+        const port = getManagerPort();
+        const apiKey = getManagerApiKey();
+
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+        };
+        if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+
+        const postData = body ? JSON.stringify(body) : undefined;
+        if (postData) {
+            headers['Content-Length'] = Buffer.byteLength(postData).toString();
+        }
+
+        const req = http.request(
+            {
+                hostname: '127.0.0.1',
+                port,
+                path,
+                method,
+                headers,
+                timeout: REFRESH_TIMEOUT_MS,
+            },
+            (res) => {
+                let data = '';
+                res.on('data', (chunk: Buffer) => {
+                    data += chunk.toString();
+                });
+                res.on('end', () => {
+                    if (!data) {
+                        resolve({ success: res.statusCode === 200 });
+                        return;
+                    }
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed && typeof parsed === 'object' && 'success' in parsed) {
+                            resolve(parsed as ManagerResponse<T>);
+                        } else {
+                            resolve({ success: res.statusCode === 200, data: parsed as T });
+                        }
+                    } catch {
+                        resolve({ success: res.statusCode === 200, data: data as unknown as T });
+                    }
+                });
+            },
+        );
+
+        req.on('error', () => {
+            resolve({ success: false, error: 'Manager not reachable' });
+        });
+
+        req.on('timeout', () => {
+            req.destroy();
+            resolve({ success: false, error: 'Refresh request timeout' });
+        });
+
+        if (postData) {
+            req.write(postData);
+        }
+        req.end();
+    });
+}
+
+/**
+ * Refresh quota data for ALL accounts.
+ * Tries multiple possible API endpoints for compatibility across Manager versions.
+ *
+ * @returns true if the refresh was successfully triggered
+ */
+export async function refreshAllAccountQuotas(): Promise<boolean> {
+    logInfo('[ManagerClient] 刷新全部账号配额...');
+
+    // Try primary endpoint
+    const result = await managerRefreshRequest<unknown>('POST', '/api/accounts/refresh', {});
+    if (result.success) {
+        logSuccess('[ManagerClient] ✅ 全部账号配额刷新成功');
+        return true;
+    }
+
+    // Try alternative endpoints
+    const altResult = await managerRefreshRequest<unknown>('POST', '/api/accounts/sync-quota', {});
+    if (altResult.success) {
+        logSuccess('[ManagerClient] ✅ 全部账号配额刷新成功 (alt API)');
+        return true;
+    }
+
+    // Try GET variant
+    const getResult = await managerRefreshRequest<unknown>('GET', '/api/accounts/refresh');
+    if (getResult.success) {
+        logSuccess('[ManagerClient] ✅ 全部账号配额刷新成功 (GET)');
+        return true;
+    }
+
+    logError(`[ManagerClient] 刷新全部配额失败: ${result.error || 'unknown'}`);
+    return false;
+}
+
+/**
+ * Refresh quota data for a SPECIFIC account by ID.
+ *
+ * @param accountId - The account ID to refresh
+ * @returns true if the refresh was successfully triggered
+ */
+export async function refreshAccountQuota(accountId: string): Promise<boolean> {
+    logInfo(`[ManagerClient] 刷新账号配额: ${accountId}`);
+
+    // Try primary endpoint
+    const result = await managerRefreshRequest<unknown>(
+        'POST',
+        `/api/accounts/${accountId}/refresh`,
+        {},
+    );
+    if (result.success) {
+        logSuccess(`[ManagerClient] ✅ 账号 ${accountId} 配额刷新成功`);
+        return true;
+    }
+
+    // Try alternative endpoint with body
+    const altResult = await managerRefreshRequest<unknown>(
+        'POST',
+        '/api/accounts/refresh',
+        { accountId },
+    );
+    if (altResult.success) {
+        logSuccess(`[ManagerClient] ✅ 账号 ${accountId} 配额刷新成功 (alt API)`);
+        return true;
+    }
+
+    // Try sync-quota variant
+    const syncResult = await managerRefreshRequest<unknown>(
+        'POST',
+        `/api/accounts/${accountId}/sync-quota`,
+        {},
+    );
+    if (syncResult.success) {
+        logSuccess(`[ManagerClient] ✅ 账号 ${accountId} 配额刷新成功 (sync-quota)`);
+        return true;
+    }
+
+    logError(`[ManagerClient] 刷新账号 ${accountId} 配额失败: ${result.error || 'unknown'}`);
+    return false;
 }

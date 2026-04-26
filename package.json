@@ -2,7 +2,7 @@
   "name": "antigravity-feishu-bot",
   "displayName": "飞书机器人 (Feishu Bot)",
   "description": "飞书双向集成：接收消息 → Antigravity Agent 处理 → 推送结果",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "repository": {
     "type": "git",
     "url": "https://github.com/ast22005-crypto/Antigravity-FeiShuPlugin"
@@ -158,6 +158,10 @@
       {
         "command": "feishu-bot.accountData",
         "title": "飞书: 查看账号配额数据"
+      },
+      {
+        "command": "feishu-bot.refreshQuota",
+        "title": "飞书: 刷新账号配额"
       }
     ],
     "viewsContainers": {

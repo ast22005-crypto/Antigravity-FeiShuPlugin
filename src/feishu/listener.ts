@@ -13,7 +13,7 @@ import { MessageQueue } from '../queue/messageQueue';
 import { FileSearcher } from '../utils/fileSearcher';
 import { logInfo, logError, logWarn, logSuccess } from '../utils/logger';
 import { recoverFromAuthError } from '../utils/restarter';
-import { getAccounts, switchToAccount } from '../utils/managerClient';
+import { getAccounts, switchToAccount, refreshAllAccountQuotas, refreshAccountQuota } from '../utils/managerClient';
 
 /**
  * Regex patterns to detect file-request commands.
@@ -77,6 +77,16 @@ const ACCOUNT_PATTERNS: RegExp[] = [
 const SWITCH_ACCOUNT_PATTERNS: RegExp[] = [
     /^(?:切换账号|切账号|使用账号)\s+(.+)/i,
     /^(?:switch\s*account|use\s*account)\s+(.+)/i,
+];
+
+/**
+ * Patterns to detect a refresh quota command.
+ * "刷新" alone → refresh all accounts.
+ * "刷新 xxx" → refresh specific account (by email or index).
+ */
+const REFRESH_PATTERNS: RegExp[] = [
+    /^(?:刷新|刷新配额|刷新额度|刷新账号配额)(?:\s+(.+))?$/,
+    /^(?:refresh|refresh\s*quota)(?:\s+(.+))?$/i,
 ];
 
 /** Maximum number of files to list when multiple matches are found */
@@ -300,6 +310,19 @@ export class FeishuListener {
                         logInfo(`📊 [${chatType}] 账号数据查询指令`);
                         this.handleAccountData();
                     }
+                    return;
+                }
+
+                // Refresh quota command: "刷新" → all, "刷新 xxx" → specific
+                const refreshArg = this.extractRefreshCommand(text);
+                if (refreshArg !== null) {
+                    this.client.sendReaction(msgId, 'OK');
+                    if (refreshArg) {
+                        logInfo(`🔄 [${chatType}] 刷新指令(指定账号): ${refreshArg}`);
+                    } else {
+                        logInfo(`🔄 [${chatType}] 刷新全部账号配额指令`);
+                    }
+                    this.handleRefreshQuota(refreshArg || undefined);
                     return;
                 }
 
@@ -829,6 +852,171 @@ export class FeishuListener {
         } catch (e: any) {
             logError(`切换账号失败: ${e.message}`);
             await this.client.sendText(`❌ 切换账号失败: ${e.message}`);
+        }
+    }
+
+    // ── Refresh quota handling ────────────────────────────────────────────
+
+    /**
+     * Extract the argument from a refresh-quota command.
+     * Returns null if not a refresh command.
+     * Returns '' (empty) for refresh-all (no argument).
+     * Returns the argument string for refresh-specific (email or index).
+     */
+    private extractRefreshCommand(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of REFRESH_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match) {
+                return match[1]?.trim() || '';
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle the refresh quota command:
+     *  - No argument: refresh all accounts, then show updated report
+     *  - With argument (email or index): refresh that specific account, then show its data
+     */
+    private async handleRefreshQuota(target?: string): Promise<void> {
+        try {
+            const pn = this.config.projectName || 'Project';
+
+            if (!target) {
+                // ── Refresh ALL accounts ──────────────────────────────────
+                await this.client.sendText('🔄 正在刷新全部账号配额，请稍候...');
+
+                const ok = await refreshAllAccountQuotas();
+
+                if (!ok) {
+                    await this.client.sendText(
+                        '⚠️ 调用 Manager 刷新接口失败（接口可能不存在或 Manager 未运行）。\n' +
+                        '正在重新获取已有配额数据...',
+                    );
+                }
+
+                // Wait a moment for Manager to update its internal cache
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                // Re-fetch and display updated quota data
+                await this.handleAccountData();
+
+                if (ok) {
+                    logSuccess('全部账号配额已刷新并发送报告');
+                }
+            } else {
+                // ── Refresh SPECIFIC account ──────────────────────────────
+                const accounts = await getAccounts();
+                if (accounts.length === 0) {
+                    await this.client.sendText('❌ 未获取到任何账号数据（Manager 可能未运行）');
+                    return;
+                }
+
+                // Resolve target: by index or by email
+                let account: typeof accounts[0] | undefined;
+                const index = parseInt(target, 10);
+                if (!isNaN(index) && String(index) === target.trim() && index >= 1 && index <= accounts.length) {
+                    account = accounts[index - 1];
+                } else {
+                    const targetLower = target.toLowerCase();
+                    account = accounts.find(
+                        a => a.email?.toLowerCase() === targetLower,
+                    ) || accounts.find(
+                        a => a.email?.toLowerCase().includes(targetLower),
+                    );
+                }
+
+                if (!account) {
+                    const availableEmails = accounts
+                        .map((a, i) => `${i + 1}. \`${a.email || a.id}\`${a.is_current ? ' 🟢' : ''}`)
+                        .join('\n');
+                    await this.client.sendCard(
+                        '❌ 未找到匹配的账号',
+                        [
+                            `未找到匹配「${target}」的账号。`,
+                            '',
+                            '**可用账号：**',
+                            availableEmails,
+                            '',
+                            '💡 可使用序号或邮箱，例如：`刷新 1` 或 `刷新 user@gmail.com`',
+                        ].join('\n'),
+                        'orange',
+                    );
+                    return;
+                }
+
+                const label = account.email || account.id;
+                await this.client.sendText(`🔄 正在刷新账号 \`${label}\` 的配额，请稍候...`);
+
+                const ok = await refreshAccountQuota(account.id);
+
+                if (!ok) {
+                    await this.client.sendText(
+                        `⚠️ 调用 Manager 单账号刷新接口失败。\n正在重新获取已有配额数据...`,
+                    );
+                }
+
+                // Wait a moment for Manager to update
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                // Re-fetch and show just this account's data
+                const updatedAccounts = await getAccounts();
+                const updatedAccount = updatedAccounts.find(a => a.id === account!.id);
+
+                if (!updatedAccount) {
+                    await this.client.sendText(`❌ 刷新后未能找到账号 \`${label}\``);
+                    return;
+                }
+
+                const TARGET_MODELS = ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking'];
+                const lines: string[] = [];
+                const email = updatedAccount.email || updatedAccount.id;
+                const currentTag = updatedAccount.is_current ? ' 🟢' : '';
+                lines.push(`**${email}**${currentTag}`);
+
+                for (const modelName of TARGET_MODELS) {
+                    const model = updatedAccount.quota?.models?.find(m => m.name === modelName);
+                    const pct = model ? `${model.percentage}%` : 'N/A';
+                    let reset_time = 'N/A';
+                    if (model?.reset_time) {
+                        const utcDate = new Date(model.reset_time.endsWith('Z') ? model.reset_time : model.reset_time + 'Z');
+                        reset_time = utcDate.toLocaleString('zh-CN', {
+                            year: 'numeric', month: '2-digit', day: '2-digit',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit',
+                            hour12: false,
+                        });
+                    }
+                    lines.push(`  · \`${modelName}\`: **${pct}** (重置时间: ${reset_time})`);
+                }
+
+                const now = new Date().toLocaleString('zh-CN', {
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    hour12: false,
+                });
+
+                const statusLabel = ok ? '✅ 已刷新' : '⚠️ 刷新接口未响应，显示缓存数据';
+                await this.client.sendCard(
+                    `🔄 ${pn} · 账号配额刷新`,
+                    [
+                        `**状态**：${statusLabel}`,
+                        '',
+                        '---',
+                        '',
+                        ...lines,
+                        '',
+                        '---',
+                        `**⏰ 刷新时间**：${now}`,
+                    ].join('\n'),
+                    ok ? 'green' : 'orange',
+                );
+
+                logSuccess(`账号 ${label} 配额刷新完成`);
+            }
+        } catch (e: any) {
+            logError(`刷新配额失败: ${e.message}`);
+            await this.client.sendText(`❌ 刷新配额失败: ${e.message}`);
         }
     }
 

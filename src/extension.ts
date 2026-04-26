@@ -44,7 +44,7 @@ import {
 import { FeishuConfig, FeishuTarget, AgentResponse } from './types';
 import { recoverFromAuthError, RecoveryResult } from './utils/restarter';
 import { safeJsonParse } from './utils/jsonRepair';
-import { getAccounts } from './utils/managerClient';
+import { getAccounts, refreshAllAccountQuotas, refreshAccountQuota } from './utils/managerClient';
 
 // ── Module-level references (accessible from command handlers) ────────────
 
@@ -913,6 +913,87 @@ function registerCommands(
         } catch (e: any) {
             logError(`获取账号数据失败: ${e.message}`);
             vscode.window.showErrorMessage(`获取账号数据失败: ${e.message}`);
+        }
+    });
+
+    // Refresh account quota
+    push('feishu-bot.refreshQuota', async () => {
+        if (!feishuClient?.hasTarget()) {
+            vscode.window.showWarningMessage('尚未激活双向通信，无法发送刷新结果');
+            return;
+        }
+
+        try {
+            vscode.window.showInformationMessage('🔄 正在刷新全部账号配额...');
+            const ok = await refreshAllAccountQuotas();
+
+            // Wait for Manager to sync
+            await sleep(2000);
+
+            // Re-fetch updated data
+            const accounts = await getAccounts();
+            if (accounts.length === 0) {
+                vscode.window.showWarningMessage('未获取到任何账号数据（Manager 可能未运行）');
+                return;
+            }
+
+            const TARGET_MODELS = ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking'];
+
+            const lines: string[] = [];
+            for (let i = 0; i < accounts.length; i++) {
+                const account = accounts[i];
+                const email = account.email || account.id;
+                const currentTag = account.is_current ? ' 🟢' : '';
+                lines.push(`**${i + 1}. ${email}**${currentTag}`);
+
+                for (const modelName of TARGET_MODELS) {
+                    const model = account.quota?.models?.find(m => m.name === modelName);
+                    const pct = model ? `${model.percentage}%` : 'N/A';
+                    let reset_time = 'N/A';
+                    if (model?.reset_time) {
+                        const utcDate = new Date(model.reset_time.endsWith('Z') ? model.reset_time : model.reset_time + 'Z');
+                        reset_time = utcDate.toLocaleString('zh-CN', {
+                            year: 'numeric', month: '2-digit', day: '2-digit',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit',
+                            hour12: false,
+                        });
+                    }
+                    lines.push(`  · \`${modelName}\`: **${pct}** (重置时间: ${reset_time})`);
+                }
+                lines.push('');
+            }
+
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                hour12: false,
+            });
+
+            const statusLabel = ok ? '✅ 已刷新' : '⚠️ 刷新接口未响应，显示缓存数据';
+            const cardOk = await feishuClient.sendCard(
+                `🔄 账号配额刷新报告`,
+                [
+                    `**状态**：${statusLabel}`,
+                    `**账号总数**：${accounts.length}`,
+                    '',
+                    '---',
+                    '',
+                    ...lines,
+                    '---',
+                    `**⏰ 刷新时间**：${now}`,
+                ].join('\n'),
+                ok ? 'green' : 'orange',
+            );
+
+            if (cardOk) {
+                vscode.window.showInformationMessage('✅ 账号配额刷新数据已发送到飞书');
+                logSuccess('账号配额刷新数据已发送到飞书');
+            } else {
+                vscode.window.showErrorMessage('推送刷新数据到飞书失败');
+            }
+        } catch (e: any) {
+            logError(`刷新账号配额失败: ${e.message}`);
+            vscode.window.showErrorMessage(`刷新账号配额失败: ${e.message}`);
         }
     });
 
