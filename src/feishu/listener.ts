@@ -89,6 +89,16 @@ const REFRESH_PATTERNS: RegExp[] = [
     /^(?:refresh|refresh\s*quota)(?:\s+(.+))?$/i,
 ];
 
+/**
+ * Patterns to detect a switch project command.
+ * "切换项目 xxx" / "打开项目 xxx" → open the project from Open Recent.
+ * "切换项目" / "项目" alone → prompt user to provide a project name.
+ */
+const SWITCH_PROJECT_PATTERNS: RegExp[] = [
+    /^(?:切换项目|切项目|打开项目|去项目|项目)(?:\s+(.+))?$/,
+    /^(?:switch\s*project|open\s*project)(?:\s+(.+))?$/i,
+];
+
 /** Maximum number of files to list when multiple matches are found */
 const MAX_LIST_RESULTS = 10;
 
@@ -323,6 +333,19 @@ export class FeishuListener {
                         logInfo(`🔄 [${chatType}] 刷新全部账号配额指令`);
                     }
                     this.handleRefreshQuota(refreshArg || undefined);
+                    return;
+                }
+
+                // Switch project command: "切换项目 xxx" → openFolder, "项目" → list
+                const projectArg = this.extractSwitchProjectCommand(text);
+                if (projectArg !== null) {
+                    this.client.sendReaction(msgId, 'OK');
+                    if (projectArg) {
+                        logInfo(`📁 [${chatType}] 切换项目指令: ${projectArg}`);
+                    } else {
+                        logInfo(`📁 [${chatType}] 列出可用项目指令`);
+                    }
+                    this.handleSwitchProject(projectArg || undefined);
                     return;
                 }
 
@@ -1017,6 +1040,162 @@ export class FeishuListener {
         } catch (e: any) {
             logError(`刷新配额失败: ${e.message}`);
             await this.client.sendText(`❌ 刷新配额失败: ${e.message}`);
+        }
+    }
+
+    // ── Switch project handling ──────────────────────────────────────────
+
+    /**
+     * Extract the argument from a switch-project command.
+     * Returns null if not a switch-project command.
+     * Returns '' (empty) for list mode (no argument).
+     * Returns the argument string for switch target.
+     */
+    private extractSwitchProjectCommand(text: string): string | null {
+        const trimmed = text.trim();
+        for (const pattern of SWITCH_PROJECT_PATTERNS) {
+            const match = trimmed.match(pattern);
+            if (match) {
+                return match[1]?.trim() || '';
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle the switch project command:
+     *  - No argument: list available projects in the projects root directory
+     *  - With argument: find matching folder and open it via vscode.openFolder
+     */
+    private async handleSwitchProject(target?: string): Promise<void> {
+        try {
+            const pn = this.config.projectName || 'Project';
+            const fs = require('fs');
+            const pathMod = require('path');
+
+            // Determine projects root directory
+            const configRoot = vscode.workspace
+                .getConfiguration('feishuBot')
+                .get<string>('projectsRoot', '');
+            const projectsRoot = configRoot
+                ? configRoot
+                : pathMod.dirname(this.workspaceRoot); // Default: parent of current workspace
+
+            // Scan for subdirectories
+            let entries: string[];
+            try {
+                entries = fs.readdirSync(projectsRoot, { withFileTypes: true })
+                    .filter((d: any) => d.isDirectory() && !d.name.startsWith('.'))
+                    .map((d: any) => d.name);
+            } catch (e: any) {
+                await this.client.sendText(`❌ 无法读取项目目录 \`${projectsRoot}\`: ${e.message}`);
+                return;
+            }
+
+            if (entries.length === 0) {
+                await this.client.sendText(`❌ 项目目录 \`${projectsRoot}\` 下没有任何子文件夹。`);
+                return;
+            }
+
+            // No argument → list available projects
+            if (!target) {
+                const lines = entries.map((name: string, i: number) => `**${i + 1}.** ${name}`);
+                await this.client.sendCard(
+                    `📁 可切换的项目 (${entries.length} 个)`,
+                    [
+                        `**当前项目**：${pn}`,
+                        `**项目目录**：\`${projectsRoot}\``,
+                        '',
+                        '---',
+                        '',
+                        ...lines,
+                        '',
+                        '---',
+                        '💡 回复 `切换项目 项目名` 可打开对应项目',
+                    ].join('\n'),
+                    'blue',
+                );
+                return;
+            }
+
+            // Fuzzy match: try exact → contains → word match
+            const queryLower = target.toLowerCase();
+            let matched: string | undefined;
+
+            // 1. Exact match (case-insensitive)
+            matched = entries.find((n: string) => n.toLowerCase() === queryLower);
+
+            // 2. By index number (from the list)
+            if (!matched) {
+                const idx = parseInt(target, 10);
+                if (!isNaN(idx) && String(idx) === target.trim() && idx >= 1 && idx <= entries.length) {
+                    matched = entries[idx - 1];
+                }
+            }
+
+            // 3. Starts-with match
+            if (!matched) {
+                matched = entries.find((n: string) => n.toLowerCase().startsWith(queryLower));
+            }
+
+            // 4. Contains match
+            if (!matched) {
+                matched = entries.find((n: string) => n.toLowerCase().includes(queryLower));
+            }
+
+            // 5. Query contains entry name
+            if (!matched) {
+                matched = entries.find((n: string) => queryLower.includes(n.toLowerCase()));
+            }
+
+            if (!matched) {
+                const lines = entries.map((name: string, i: number) => `**${i + 1}.** ${name}`);
+                await this.client.sendCard(
+                    `❌ 未找到匹配「${target}」的项目`,
+                    [
+                        '**可用项目：**',
+                        '',
+                        ...lines,
+                        '',
+                        '---',
+                        '💡 请使用以上项目名称重试，例如：`切换项目 ' + entries[0] + '`',
+                    ].join('\n'),
+                    'orange',
+                );
+                return;
+            }
+
+            // Check if it's the current project
+            const currentFolder = pathMod.basename(this.workspaceRoot);
+            if (matched === currentFolder) {
+                await this.client.sendText(`ℹ️ 「${matched}」已经是当前项目，无需切换。`);
+                return;
+            }
+
+            // Open the matched project folder
+            const targetPath = pathMod.join(projectsRoot, matched);
+            const targetUri = vscode.Uri.file(targetPath);
+
+            await this.client.sendCard(
+                `📁 ${pn} · 正在切换项目`,
+                [
+                    `**来源项目**：${pn}`,
+                    `**目标项目**：${matched}`,
+                    `**路径**：\`${targetPath}\``,
+                    '',
+                    '---',
+                    '> 💡 Antigravity 正在打开目标项目窗口。',
+                ].join('\n'),
+                'green',
+            );
+
+            // Open the folder in the current window (replaces the workspace)
+            await vscode.commands.executeCommand('vscode.openFolder', targetUri);
+
+            logSuccess(`飞书指令切换项目成功: ${matched} → ${targetPath}`);
+        } catch (e: any) {
+            logError(`切换项目处理失败: ${e.message}`);
+            await this.client.sendText(`❌ 切换项目失败: ${e.message}`);
         }
     }
 

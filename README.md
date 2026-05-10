@@ -22,6 +22,7 @@
 | 🎛️ **模型热切换** | 在飞书中发送指令，全自动跨平台选用并切换 Antigravity 主要/计划模型 |
 | 🚫 **配额异常通知** | 检测到 Model quota reached 时自动通知飞书 |
 | 📊 **账号配额管理** | 在飞书中查询所有账号配额，并可通过序号或邮箱一键切换账号 |
+| 📁 **项目切换** | 在飞书中发送 `切换项目 xxx` 即可将当前窗口切换到目标项目，纯 VS Code API 调用，全平台通用 |
 | 📋 **消息队列管理** | 支持消息排队、去重、超时保护、自动批处理 |
 | 🧠 **Skill 自动注入** | 自动生成 SKILL.md，让 Agent 理解飞书工作流 |
 | 🎯 **状态栏 & 侧边栏** | 实时显示连接状态、消息队列、处理进度 |
@@ -135,6 +136,7 @@ npm run package
 | `feishuBot.autoRestartThreshold`| number | `10` | 连续重试达到此次数后，自动通过 Manager 切换账号恢复 |
 | `feishuBot.managerPort` | number | `8045` | Antigravity-Manager 本地 API 端口（用于认证失败时自动切换账号） |
 | `feishuBot.managerApiKey` | string | `""` | Antigravity-Manager API Key（如果 Manager 配置了鉴权则填写） |
+| `feishuBot.projectsRoot` | string | `""` | 项目根目录路径（切换项目时扫描此目录下的子文件夹）。留空则使用当前工作区的父目录 |
 
 ### 4. 开始使用
 
@@ -245,6 +247,33 @@ switch account user@gmail.com
 - 报告包含 `gemini-3.1-pro-high` 和 `claude-opus-4-6-thinking` 模型的配额百分比及重置时间。
 - 直接回复 `账号 序号` 即可一键切换，无需记忆邮箱。
 - 未匹配时会显示可用账号列表及使用提示。
+
+#### 6. 项目切换
+
+在飞书中切换当前 Antigravity 窗口的工作区到其他项目：
+
+```text
+# 列出可切换的项目
+项目
+切换项目
+
+# 按名称切换（支持模糊匹配）
+切换项目 Book_DS
+打开项目 Antigravity-Manager
+
+# 按序号切换（序号来自项目列表）
+切换项目 2
+
+# 英文指令
+switch project Book_DS
+open project xxx
+```
+
+- 插件会扫描 `feishuBot.projectsRoot` 配置的目录（默认为当前工作区的父目录）下的子文件夹。
+- 支持精确匹配、前缀匹配、包含匹配等多级模糊搜索。
+- 匹配成功后通过 VS Code 原生 API (`vscode.openFolder`) 直接打开，**全平台通用**，无需外部脚本。
+- 如果目标项目已安装飞书插件，切换后该窗口的插件将自动接管后续消息。
+- 发送 `项目` 或 `切换项目`（不带参数）可查看所有可切换的项目列表。
 
 ### Agent 响应协议
 

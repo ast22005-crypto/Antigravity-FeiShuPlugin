@@ -122,6 +122,12 @@
           "maximum": 120,
           "description": "认证刷新间隔（分钟），建议 15-60",
           "order": 15
+        },
+        "feishuBot.projectsRoot": {
+          "type": "string",
+          "default": "",
+          "description": "项目根目录路径（切换项目时扫描此目录下的子文件夹）。留空则使用当前工作区的父目录。",
+          "order": 16
         }
       }
     },
