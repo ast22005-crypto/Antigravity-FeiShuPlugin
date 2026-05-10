@@ -26,7 +26,9 @@ import { FeishuListener } from './feishu/listener';
 import { MessageQueue } from './queue/messageQueue';
 import { AgentBridge } from './agent/bridge';
 import { ErrorWatcher } from './agent/errorWatcher';
+import { CompletionDetector } from './agent/completionDetector';
 import { OutputWatcher } from './agent/outputWatcher';
+import { AuthKeepAlive } from './agent/authKeepAlive';
 import { SkillInjector } from './agent/skillInjector';
 import { StatusBar } from './ui/statusBar';
 import {
@@ -61,6 +63,8 @@ let isHandlingResponse = false;
 let errorWatcher: ErrorWatcher | undefined;
 let outputWatcher: OutputWatcher | undefined;
 let processingTimeoutTimer: ReturnType<typeof setInterval> | undefined;
+let completionDetector: CompletionDetector | undefined;
+let authKeepAlive: AuthKeepAlive | undefined;
 
 const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const RESPONSE_POLL_INTERVAL_MS = 10_000; // 10 seconds
@@ -105,6 +109,7 @@ export async function activate(
     feishuClient = new FeishuClient(config);
     messageQueue = new MessageQueue(workspaceRoot);
     agentBridge = new AgentBridge(messageQueue, config);
+    completionDetector = new CompletionDetector(workspaceRoot);
 
     // Reset stale processing lock from previous session —
     // on fresh start, no Agent is actually processing anything.
@@ -212,6 +217,11 @@ export async function activate(
         messageQueue.onQueueChange(data => {
             if (data.processing) {
                 statusBar!.setProcessing();
+                // Take workspace snapshot when entering processing state
+                if (completionDetector && data.processingMessages.length > 0) {
+                    const msgTexts = data.processingMessages.map(m => m.text);
+                    completionDetector.takeSnapshot(msgTexts);
+                }
             } else {
                 statusBar!.setConnected(data.messages.length);
             }
@@ -486,6 +496,68 @@ export async function activate(
         }
     });
 
+    // ── 11c. Auth KeepAlive ────────────────────────────────────────────
+
+    const keepAliveEnabled = vscode.workspace
+        .getConfiguration('feishuBot')
+        .get<boolean>('authKeepAlive', true);
+
+    if (keepAliveEnabled) {
+        const keepAliveIntervalMin = vscode.workspace
+            .getConfiguration('feishuBot')
+            .get<number>('authKeepAliveInterval', 30);
+
+        authKeepAlive = new AuthKeepAlive(keepAliveIntervalMin * 60 * 1000);
+
+        // When proactive refresh detects a stale token → switch account
+        authKeepAlive.onRefreshFailed(async ({ detail, count }) => {
+            const pn = getProjectName(config);
+            const now = new Date().toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+            });
+
+            logWarn(
+                `🔑 [AuthKeepAlive] 保活刷新失败 (第 ${count} 次)，尝试账号切换恢复...`,
+            );
+
+            // Notify Feishu
+            if (feishuClient?.hasTarget()) {
+                await feishuClient.sendCard(
+                    `🔑 ${pn} · 认证保活刷新失败`,
+                    [
+                        `**项目**：${pn}`,
+                        `**事件**：定期认证刷新后检测到 token 异常`,
+                        `**操作**：尝试通过 Antigravity-Manager 切换账号`,
+                        `**详情**：${detail}`,
+                        `**累计失败**：第 **${count}** 次`,
+                        `**时间**：${now}`,
+                    ].join('\n'),
+                    'orange',
+                );
+            }
+
+            // Execute account-switching recovery
+            const result = await recoverFromAuthError();
+
+            if (feishuClient?.hasTarget()) {
+                if (result === 'switched') {
+                    await feishuClient.sendText('✅ 认证保活：刷新失败但已通过账号切换恢复（零停机）');
+                } else {
+                    await feishuClient.sendText('❌ 认证保活：刷新失败且账号切换也失败，请手动介入。');
+                }
+            }
+        });
+
+        authKeepAlive.start();
+        context.subscriptions.push({ dispose: () => authKeepAlive!.dispose() });
+    }
+
     // ── 12. Send project-open notification ─────────────────────────────
 
     if (config.notifyOnOpen && feishuClient.hasTarget()) {
@@ -499,11 +571,60 @@ export async function activate(
 
     // ── 13. Processing timeout watchdog ───────────────────────────────
 
-    processingTimeoutTimer = setInterval(() => {
+    processingTimeoutTimer = setInterval(async () => {
         if (messageQueue?.isProcessingTimedOut(PROCESSING_TIMEOUT_MS)) {
             logWarn(
                 `⏰ 处理超时（${PROCESSING_TIMEOUT_MS / 60000} 分钟），自动释放 processing 锁`,
             );
+
+            // ── Fallback notification: detect what the Agent changed ──
+            if (feishuClient?.hasTarget() && config.notifyOnCompletion) {
+                const pn = getProjectName(config);
+                const now = new Date().toLocaleString('zh-CN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                });
+
+                let changeSummary = '';
+                if (completionDetector) {
+                    const diff = completionDetector.compareSnapshot();
+                    changeSummary = completionDetector.buildChangeSummary(diff);
+                    completionDetector.clear();
+                }
+
+                const originalMsgs = messageQueue.getData().processingMessages
+                    .map(m => m.text)
+                    .slice(0, 3)
+                    .map(t => `「${t.slice(0, 40)}」`)
+                    .join(', ');
+
+                const bodyParts = [
+                    `**项目**：${pn}`,
+                    `**事件**：Agent 处理超时（${PROCESSING_TIMEOUT_MS / 60000} 分钟），未生成通知文件`,
+                    originalMsgs ? `**原始指令**：${originalMsgs}` : '',
+                    `**时间**：${now}`,
+                    '',
+                    '---',
+                    '',
+                    changeSummary || '未检测到工作区文件变更。',
+                    '',
+                    '---',
+                    '> ⚠️ Agent 可能已完成任务但遗漏了通知步骤。请检查以上变更是否符合预期。',
+                ].filter(Boolean);
+
+                await feishuClient.sendCard(
+                    `⚠️ ${pn} · Agent 处理超时`,
+                    bodyParts.join('\n'),
+                    'orange',
+                );
+                logInfo('已发送超时兜底通知到飞书');
+            }
+
             messageQueue.clearProcessed();
             statusBar?.setConnected(messageQueue.getMessageCount());
             refreshConnectionStatus();
@@ -593,18 +714,64 @@ async function handleResponseFile(
             }
         }
 
-        // Send files if requested by Agent
+        // ── Send files: explicit sendFiles + auto-detected changes ─────
+        const sentFiles = new Set<string>();
+
+        // 1) Send files explicitly requested by Agent (sendFiles)
         if (response.sendFiles && response.sendFiles.length > 0 && feishuClient) {
             logInfo(`Agent 请求发送 ${response.sendFiles.length} 个文件`);
             for (const filePath of response.sendFiles) {
-                // Resolve relative paths against workspace root
                 const absPath = path.isAbsolute(filePath)
                     ? filePath
                     : path.join(workspaceRoot, filePath);
                 const ok = await feishuClient.uploadAndSendFile(absPath);
-                if (!ok) {
+                if (ok) {
+                    sentFiles.add(filePath);
+                } else {
                     logWarn(`文件发送失败: ${filePath}`);
                 }
+            }
+        }
+
+        // 2) Auto-send changed files detected by CompletionDetector + files field
+        if (feishuClient?.hasTarget() && completionDetector) {
+            const diff = completionDetector.compareSnapshot();
+
+            // Merge: Agent's informational `files` list + detector's changes
+            const candidates = new Set<string>();
+            for (const f of response.files || []) {
+                candidates.add(f);
+            }
+            if (diff.hasChanges) {
+                for (const f of [...diff.created, ...diff.modified]) {
+                    candidates.add(f);
+                }
+            }
+
+            // Filter out already-sent, non-content, and over-limit files
+            const MAX_AUTO_SEND = 5;
+            const toSend = [...candidates]
+                .filter(f => !sentFiles.has(f))
+                .filter(f => shouldAutoSendFile(f))
+                .slice(0, MAX_AUTO_SEND);
+
+            if (toSend.length > 0) {
+                logInfo(`自动发送 ${toSend.length} 个变更文件到飞书`);
+                for (const filePath of toSend) {
+                    const absPath = path.isAbsolute(filePath)
+                        ? filePath
+                        : path.join(workspaceRoot, filePath);
+                    const ok = await feishuClient.uploadAndSendFile(absPath);
+                    if (!ok) {
+                        logWarn(`自动发送文件失败: ${filePath}`);
+                    }
+                }
+            }
+
+            if (diff.hasChanges && candidates.size > MAX_AUTO_SEND) {
+                logInfo(
+                    `变更文件共 ${candidates.size} 个，已自动发送前 ${MAX_AUTO_SEND} 个`,
+                );
             }
         }
 
@@ -618,6 +785,9 @@ async function handleResponseFile(
                 setTimeout(() => agentBridge?.trigger(), 5000);
             }
         }
+
+        // Clear completion detector — normal response path succeeded
+        completionDetector?.clear();
 
         // Delete the response file
         try {
@@ -1009,6 +1179,23 @@ function registerCommands(
         ];
         showOutputChannel();
         logInfo(`飞书状态:\n  ${items.join('\n  ')}`);
+
+        // Auth KeepAlive stats
+        if (authKeepAlive) {
+            const stats = authKeepAlive.getStats();
+            const lastTime = stats.lastRefreshTime
+                ? new Date(stats.lastRefreshTime).toLocaleString('zh-CN', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                      hour12: false,
+                  })
+                : '未刷新';
+            logInfo(
+                `认证保活: ${stats.isRunning ? '✅' : '❌'} (刷新 ${stats.refreshCount} 次, 失败 ${stats.failureCount} 次, 上次: ${lastTime})`,
+            );
+        }
+
         vscode.window.showInformationMessage(items.join(' | '));
     });
 }
@@ -1028,6 +1215,43 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Auto-send file filter ─────────────────────────────────────────────────
+
+/** Extensions considered content files worth auto-sending to Feishu */
+const AUTO_SEND_EXTENSIONS = new Set([
+    '.md', '.txt', '.doc', '.docx', '.pdf',
+    '.csv', '.xlsx', '.xls',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
+    '.html', '.htm',
+]);
+
+/** Directories whose files should never be auto-sent */
+const AUTO_SEND_EXCLUDED_DIRS = [
+    '.antigravity',
+    '.agents',
+    '.git',
+    '.vscode',
+    '.gemini',
+    'node_modules',
+    'out',
+    'dist',
+];
+
+/**
+ * Determine whether a workspace-relative file path is eligible for
+ * automatic upload to Feishu.  Only content/document files pass.
+ */
+function shouldAutoSendFile(relativePath: string): boolean {
+    const normalized = relativePath.replace(/\\/g, '/');
+    for (const dir of AUTO_SEND_EXCLUDED_DIRS) {
+        if (normalized.startsWith(dir + '/')) {
+            return false;
+        }
+    }
+    const ext = path.extname(normalized).toLowerCase();
+    return AUTO_SEND_EXTENSIONS.has(ext);
+}
+
 // ── Deactivate ────────────────────────────────────────────────────────────
 
 export function deactivate(): void {
@@ -1035,6 +1259,7 @@ export function deactivate(): void {
     feishuListener?.stop();
     errorWatcher?.dispose();
     outputWatcher?.dispose();
+    authKeepAlive?.dispose();
     messageQueue?.dispose();
     responseWatcher?.dispose();
     if (responsePollingTimer) {

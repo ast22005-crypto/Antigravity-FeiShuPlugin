@@ -108,6 +108,20 @@
           "default": "",
           "description": "Antigravity-Manager API Key（如果 Manager 配置了鉴权则填写）",
           "order": 13
+        },
+        "feishuBot.authKeepAlive": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用定期认证刷新保活（防止长时间空闲后 Antigravity 认证失效）",
+          "order": 14
+        },
+        "feishuBot.authKeepAliveInterval": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 120,
+          "description": "认证刷新间隔（分钟），建议 15-60",
+          "order": 15
         }
       }
     },
