@@ -44,6 +44,7 @@ export class AuthKeepAlive {
     private lastRefreshTime = 0;
     private intervalMs: number;
     private refreshing = false;
+    private missingCommandLogged = false;
 
     /** Fires when a refresh attempt detects an auth error (token may be dead). */
     private _onRefreshFailed = new vscode.EventEmitter<{ detail: string; count: number }>();
@@ -128,7 +129,7 @@ export class AuthKeepAlive {
                 }
 
                 const uriStr = e.document.uri.toString().toLowerCase();
-                const isAntigravity = ['antigravity', 'gemini', 'cloudcode'].some(
+                const isAntigravity = ['antigravity', 'agy', 'gemini', 'cloudcode'].some(
                     hint => uriStr.includes(hint),
                 );
                 if (!isAntigravity) {
@@ -145,12 +146,43 @@ export class AuthKeepAlive {
                 }
             });
 
-            // Execute the built-in auth refresh command
-            try {
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-            } catch (e: any) {
-                logWarn(`🔑 [AuthKeepAlive] handleAuthRefresh 命令执行异常: ${e.message}`);
-                // Command might not exist or might throw — not fatal
+            // Discover which auth command the current Antigravity IDE version provides:
+            //  - Legacy Antigravity IDE: `antigravity.handleAuthRefresh`
+            //  - New Antigravity IDE (`google.google-antigravity` / `agy`): `antigravity.internal.getAuthStatus`
+            const agyExt = vscode.extensions.getExtension('google.google-antigravity');
+            if (agyExt && !agyExt.isActive) {
+                try {
+                    await agyExt.activate();
+                } catch {
+                    // ignore
+                }
+            }
+
+            const allCommands = await vscode.commands.getCommands(true);
+            if (allCommands.includes('antigravity.handleAuthRefresh')) {
+                try {
+                    await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                } catch (e: any) {
+                    logWarn(`🔑 [AuthKeepAlive] handleAuthRefresh 命令执行异常: ${e.message}`);
+                }
+            } else if (allCommands.includes('antigravity.internal.getAuthStatus')) {
+                try {
+                    const status = await vscode.commands.executeCommand<{
+                        hasValidAuth?: boolean;
+                        failureCase?: string;
+                        uiMessage?: string;
+                    }>('antigravity.internal.getAuthStatus');
+                    if (status && status.hasValidAuth === false && status.failureCase) {
+                        logWarn(
+                            `🔑 [AuthKeepAlive] getAuthStatus 报告状态异常: ${status.failureCase} ${status.uiMessage || ''}`.trim(),
+                        );
+                    }
+                } catch (e: any) {
+                    logWarn(`🔑 [AuthKeepAlive] getAuthStatus 执行异常: ${e.message}`);
+                }
+            } else if (!this.missingCommandLogged) {
+                this.missingCommandLogged = true;
+                logInfo('🔑 [AuthKeepAlive] 当前 IDE 由后端自动维护认证，仅监听日志错误');
             }
 
             // Wait briefly to observe Output Channel for errors

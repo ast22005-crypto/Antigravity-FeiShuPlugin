@@ -484,6 +484,30 @@ export class FeishuListener {
      */
     private async handleNewConversation(): Promise<void> {
         try {
+            logInfo('💬 收到飞书开启新对话指令，正在执行...');
+            const agyExt = vscode.extensions.getExtension('google.google-antigravity');
+            if (agyExt && !agyExt.isActive) {
+                try {
+                    await agyExt.activate();
+                } catch {
+                    // ignore
+                }
+            }
+
+            const allCommands = await vscode.commands.getCommands(true);
+            if (allCommands.includes('antigravity.startNewConversation')) {
+                await vscode.commands.executeCommand('antigravity.startNewConversation');
+            } else if (allCommands.includes('antigravity.resetConversation')) {
+                await vscode.commands.executeCommand('antigravity.resetConversation');
+            } else {
+                throw new Error('当前 IDE 未找到新建对话命令');
+            }
+
+            // Also release any stale processing lock so new messages aren't blocked
+            if (this.queue.isProcessing()) {
+                this.queue.clearProcessed();
+            }
+
             const pn = this.config.projectName || 'Project';
             await this.client.sendCard(
                 `💬 ${pn} · 开启新对话`,
@@ -496,9 +520,6 @@ export class FeishuListener {
                 ].join('\n'),
                 'green',
             );
-
-            logInfo('💬 收到飞书开启新对话指令，正在执行...');
-            vscode.commands.executeCommand('antigravity.startNewConversation');
         } catch (e: any) {
             logError(`开启新对话处理失败: ${e.message}`);
             await this.client.sendText(`❌ 开启新对话失败: ${e.message}`);
@@ -529,6 +550,15 @@ export class FeishuListener {
      */
     private async handleSwitchModel(modelName: string): Promise<void> {
         try {
+            const allCommands = await vscode.commands.getCommands(true);
+            if (!allCommands.includes('antigravity.toggleModelSelector')) {
+                logWarn('当前版本 Antigravity IDE 未注册 antigravity.toggleModelSelector 命令');
+                await this.client.sendText(
+                    `⚠️ 当前新版 Antigravity IDE 已将模型选择器迁移至内置 Webview 聊天框与 Settings 面板中，不再对外暴露 \`toggleModelSelector\` 命令，请在 Antigravity 对话面板底部或 Settings 中直接选择模型「${modelName}」。`,
+                );
+                return;
+            }
+
             // 唤出 Antigravity 模型选择器 (UI 层面)
             await vscode.commands.executeCommand('antigravity.toggleModelSelector');
             
@@ -594,6 +624,10 @@ export class FeishuListener {
                         logInfo(`✅ 成功向 Antigravity 选中模型项: ${modelName}`);
                     }
                 });
+            } else {
+                await this.client.sendText(
+                    `ℹ️ 已唤出模型选择面板，当前操作系统 (${process.platform}) 不支持 UI 自动点击，请在界面中手动选择「${modelName}」。`,
+                );
             }
 
         } catch (e: any) {
@@ -624,6 +658,15 @@ export class FeishuListener {
      */
     private async handleSwitchPlanModel(modelName: string): Promise<void> {
         try {
+            const allCommands = await vscode.commands.getCommands(true);
+            if (!allCommands.includes('antigravity.togglePlanningModeSelector')) {
+                logWarn('当前版本 Antigravity IDE 未注册 antigravity.togglePlanningModeSelector 命令');
+                await this.client.sendText(
+                    `⚠️ 当前新版 Antigravity IDE 已不再注册 \`togglePlanningModeSelector\` 命令，请在 Antigravity 对话面板中直接切换模式或模型「${modelName}」。`,
+                );
+                return;
+            }
+
             await vscode.commands.executeCommand('antigravity.togglePlanningModeSelector');
             
             const cp = require('child_process');
@@ -679,6 +722,10 @@ export class FeishuListener {
                         logInfo(`✅ 成功向 Antigravity 选中计划模型项: ${modelName}`);
                     }
                 });
+            } else {
+                await this.client.sendText(
+                    `ℹ️ 已唤出计划模型选择面板，当前操作系统 (${process.platform}) 不支持 UI 自动点击，请在界面中手动选择「${modelName}」。`,
+                );
             }
 
         } catch (e: any) {

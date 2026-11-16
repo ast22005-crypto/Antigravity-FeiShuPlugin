@@ -28,6 +28,7 @@ const AUTH_ERROR_PATTERNS = [
  */
 const ANTIGRAVITY_CHANNEL_HINTS = [
     'antigravity',
+    'agy',
     'gemini',
     'cloudcode',
     'cloud code',

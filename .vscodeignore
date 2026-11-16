@@ -1,4 +1,7 @@
 .vscode/
+.agents/
+.antigravity/
+*.vsix
 src/
 *.map
 .gitignore

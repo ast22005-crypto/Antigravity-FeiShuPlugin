@@ -84,7 +84,7 @@ def find_pid():
     try:
         r = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True)
         for line in r.stdout.strip().split("\n"):
-            if "Antigravity.app/Contents/MacOS/Electron" in line and "Helper" not in line and "grep" not in line:
+            if ("Antigravity IDE.app/Contents/MacOS/" in line or "Antigravity.app/Contents/MacOS/" in line) and "Helper" not in line and "crashpad" not in line and "grep" not in line:
                 return int(line.strip().split()[0])
     except: pass
     return None

@@ -1,11 +1,15 @@
 /**
  * agent/bridge.ts — Trigger Antigravity Agent via VS Code Chat API
  *
- * Replaces the Win32 window-simulation hack (SetForegroundWindow + Ctrl+L)
- * with native VS Code / Antigravity commands.
- *
- * Since Antigravity is a VS Code fork, the exact chat command names differ.
- * We auto-discover the correct command on first use.
+ * Supports both:
+ *  - New Antigravity IDE (`google.google-antigravity` / `agy` webview):
+ *    uses `antigravity.addContext` + `antigravity.triggerSend`
+ *    (NOTE: `antigravity.sendPromptToAgentPanel` still exists in the workbench
+ *     as a dead stub for the retired legacy panel and MUST NOT be preferred
+ *     when `antigravity.triggerSend` is available).
+ *  - Legacy Antigravity IDE / VS Code / Copilot forks:
+ *    falls back to `antigravity.sendPromptToAgentPanel`, `workbench.action.chat.open`,
+ *    or focusing the chat panel + copying the prompt to clipboard.
  */
 
 import * as vscode from 'vscode';
@@ -13,22 +17,32 @@ import { MessageQueue } from '../queue/messageQueue';
 import { FeishuConfig } from '../types';
 import { logInfo, logWarn, logError, logSuccess } from '../utils/logger';
 
+/** Sentinel representing the new Antigravity IDE two-step RPC trigger */
+const AGY_CONTEXT_SEND_MODE = 'antigravity.addContext+triggerSend';
+
 /**
- * Known candidate commands for opening the chat panel across
- * VS Code, Copilot, Antigravity, Cursor, and other forks.
+ * Candidate commands for directly submitting a prompt (legacy Antigravity & VS Code).
+ * Only checked AFTER verifying that the new `agy` two-step mode is not available.
  */
-const CHAT_COMMAND_CANDIDATES = [
-    // Antigravity — send prompt directly (BEST match)
+const DIRECT_SEND_CANDIDATES = [
+    // Legacy Antigravity — send prompt directly (only works on pre-agy IDE)
     'antigravity.sendPromptToAgentPanel',
-    // Antigravity — open/focus agent
+    // VS Code standard
+    'workbench.action.chat.open',
+    'workbench.action.chat.newChat',
+];
+
+/**
+ * Candidate commands for opening/focusing the chat panel (clipboard fallback).
+ */
+const FOCUS_PANEL_CANDIDATES = [
+    'antigravity.panel.focus',
     'antigravity.openAgent',
     'antigravity.toggleChatFocus',
     'antigravity.startNewConversation',
     'antigravity.agentSidePanel.focus',
-    // VS Code standard
     'workbench.action.chat.open',
     'workbench.action.chat.newChat',
-    // Copilot Chat
     'workbench.panel.chat.view.copilot.focus',
 ];
 
@@ -49,13 +63,34 @@ export class AgentBridge {
     }
 
     /**
+     * Ensure the built-in Antigravity extension (`google.google-antigravity`
+     * or `google.antigravity`) is activated so its commands are registered.
+     */
+    private async ensureAntigravityActivated(): Promise<void> {
+        const extIds = ['google.google-antigravity', 'google.antigravity'];
+        for (const id of extIds) {
+            const ext = vscode.extensions.getExtension(id);
+            if (ext && !ext.isActive) {
+                try {
+                    await ext.activate();
+                    logInfo(`已激活内置扩展: ${id}`);
+                } catch (e: any) {
+                    logWarn(`激活扩展 ${id} 失败: ${e.message}`);
+                }
+            }
+        }
+    }
+
+    /**
      * Discover available chat-related commands in the current IDE and
-     * pick the best matching one from our candidates list.
+     * pick the best matching one.
      */
     async discoverChatCommand(): Promise<string | null> {
         if (this.resolvedCommand) {
             return this.resolvedCommand;
         }
+
+        await this.ensureAntigravityActivated();
 
         const all = await vscode.commands.getCommands(true);
 
@@ -70,8 +105,22 @@ export class AgentBridge {
             `可用的 Chat/Agent 相关命令 (${chatCommands.length}):\n  ${chatCommands.join('\n  ')}`,
         );
 
-        // Try our candidates first (in priority order)
-        for (const candidate of CHAT_COMMAND_CANDIDATES) {
+        // 1. New Antigravity IDE (`google.google-antigravity` / `agy` webview):
+        //    Must take priority over `antigravity.sendPromptToAgentPanel`, which
+        //    remains registered as a dead workbench stub in new Antigravity IDE.
+        if (
+            all.includes('antigravity.addContext') &&
+            all.includes('antigravity.triggerSend')
+        ) {
+            this.resolvedCommand = AGY_CONTEXT_SEND_MODE;
+            logSuccess(
+                `已发现新版 Antigravity 聊天指令组合: antigravity.addContext + antigravity.triggerSend`,
+            );
+            return this.resolvedCommand;
+        }
+
+        // 2. Direct send commands (legacy Antigravity IDE / standard VS Code)
+        for (const candidate of DIRECT_SEND_CANDIDATES) {
             if (all.includes(candidate)) {
                 this.resolvedCommand = candidate;
                 logSuccess(`已发现聊天命令: ${candidate}`);
@@ -79,7 +128,7 @@ export class AgentBridge {
             }
         }
 
-        // Fallback: find any command that looks like a chat open command
+        // 3. Fallback: find any command that looks like a chat open command
         const fallback = chatCommands.find(
             c =>
                 (c.includes('chat') && c.includes('open')) ||
@@ -94,6 +143,33 @@ export class AgentBridge {
 
         logError('未找到任何可用的聊天命令');
         return null;
+    }
+
+    /**
+     * Send prompt into the new Antigravity IDE (`google.google-antigravity`) panel
+     * using `antigravity.addContext` followed by `antigravity.triggerSend`.
+     */
+    private async sendViaAgyPanel(query: string): Promise<void> {
+        await this.ensureAntigravityActivated();
+
+        try {
+            await vscode.commands.executeCommand('antigravity.addContext', query);
+        } catch (firstErr: any) {
+            // If the Antigravity sidebar was left on a non-chat subpage (e.g. History /
+            // Customizations / Settings), the Lexical chat editor is not mounted yet.
+            // `antigravity.startNewConversation` is handled at the app root and navigates
+            // back to a live chat input box so `addContext` can succeed.
+            logWarn(
+                `antigravity.addContext 首次写入失败 (${firstErr.message})，尝试开启新对话页面后重试...`,
+            );
+            await vscode.commands.executeCommand('antigravity.startNewConversation');
+            await this.sleep(600);
+            await vscode.commands.executeCommand('antigravity.addContext', query);
+        }
+
+        // Brief settle delay before triggering submission
+        await this.sleep(150);
+        await vscode.commands.executeCommand('antigravity.triggerSend');
     }
 
     /**
@@ -128,8 +204,8 @@ export class AgentBridge {
             return false;
         }
 
-        // Discover command on first use
-        if (!this.discoveryDone) {
+        // Discover command on first use (or re-discover if previous discovery failed)
+        if (!this.discoveryDone || !this.resolvedCommand) {
             this.discoveryDone = true;
             await this.discoverChatCommand();
         }
@@ -154,18 +230,23 @@ export class AgentBridge {
         // Try discovered command first
         if (this.resolvedCommand) {
             try {
-                // antigravity.sendPromptToAgentPanel expects a plain string
-                // VS Code workbench.action.chat.open expects { query, isPartialQuery }
-                const isAntigravityCmd =
-                    this.resolvedCommand.startsWith('antigravity.');
-                const arg = isAntigravityCmd
-                    ? query
-                    : { query, isPartialQuery: false };
+                if (this.resolvedCommand === AGY_CONTEXT_SEND_MODE) {
+                    await this.sendViaAgyPanel(query);
+                } else {
+                    // Legacy antigravity.sendPromptToAgentPanel expects a plain string;
+                    // VS Code workbench.action.chat.open expects { query, isPartialQuery }.
+                    const isAntigravityCmd =
+                        this.resolvedCommand.startsWith('antigravity.');
+                    const arg = isAntigravityCmd
+                        ? query
+                        : { query, isPartialQuery: false };
 
-                await vscode.commands.executeCommand(
-                    this.resolvedCommand,
-                    arg,
-                );
+                    await vscode.commands.executeCommand(
+                        this.resolvedCommand,
+                        arg,
+                    );
+                }
+
                 this.lastTriggerTime = now;
                 this.queue.readAndLock();
                 logSuccess(
@@ -176,6 +257,8 @@ export class AgentBridge {
                 logWarn(
                     `命令 ${this.resolvedCommand} 执行失败: ${e.message}，尝试备选方案`,
                 );
+                // Reset resolvedCommand so next trigger can re-discover if needed
+                this.resolvedCommand = null;
             }
         }
 
@@ -183,11 +266,10 @@ export class AgentBridge {
         try {
             await vscode.env.clipboard.writeText(query);
 
-            // Try each candidate command until one works
-            for (const cmd of CHAT_COMMAND_CANDIDATES) {
+            // Try each focus candidate command until one works
+            for (const cmd of FOCUS_PANEL_CANDIDATES) {
                 try {
                     await vscode.commands.executeCommand(cmd);
-                    this.resolvedCommand = cmd;
                     this.lastTriggerTime = now;
                     this.queue.readAndLock();
                     logSuccess(
@@ -223,5 +305,9 @@ export class AgentBridge {
             logError(`Agent 触发失败: ${e.message}`);
             return false;
         }
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }

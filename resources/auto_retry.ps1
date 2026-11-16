@@ -66,7 +66,7 @@ try {
     $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $windowCondition)
     foreach ($w in $windows) {
         $wName = $w.Current.Name
-        if ($wName -and ($wName.Contains("Visual Studio Code") -or $wName.Contains("Cursor"))) {
+        if ($wName -and ($wName.Contains("Antigravity") -or $wName.Contains("Visual Studio Code") -or $wName.Contains("Cursor"))) {
             $textElements = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)
             foreach ($te in $textElements) {
                 $text = $te.Current.Name

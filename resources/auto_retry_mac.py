@@ -238,8 +238,9 @@ def find_antigravity_pid():
             capture_output=True, text=True, timeout=5,
         )
         for line in result.stdout.strip().split("\n"):
-            if "Antigravity.app/Contents/MacOS/Electron" in line \
+            if ("Antigravity IDE.app/Contents/MacOS/" in line or "Antigravity.app/Contents/MacOS/" in line) \
                and "Helper" not in line \
+               and "crashpad" not in line \
                and "grep" not in line:
                 return int(line.strip().split()[0])
     except Exception:
